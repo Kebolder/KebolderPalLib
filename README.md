@@ -4,6 +4,10 @@
 
 Shared [UE4SS](https://github.com/Okaetsu/RE-UE4SS) library for Palworld mods.
 
+> ⚠️ **Experimental.** APIs are prone to change, break, and crash. If you hit a
+> crash while using the lib, please [open an issue](https://github.com/Kebolder/KebolderPalLib/issues/new)
+> and attach your crash files from `%LocalAppData%\Pal\Saved\Crashes`.
+
 A collection of Lua-driven modules that take the friction out of building and
 running Palworld mods. Rather than solving one specific thing, it bundles the
 plumbing most mods end up re-inventing lifecycle events, cached O(1) object
