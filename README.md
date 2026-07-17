@@ -2,13 +2,12 @@
 
 Shared [UE4SS](https://github.com/Okaetsu/RE-UE4SS) library for Palworld mods.
 
-Its headline feature: **native-looking custom interact prompts** — add your own
-row to any object's floating F/V/C list, glyphs and animations included, and get
-press/hold/release callbacks. No custom UI to build; it rides the game's own
-indicator canvas.
-
-Also bundles the plumbing most mods re-invent: device-aware key glyphs, lifecycle
-events, cached O(1) object lookups, and callback pinning.
+A collection of Lua-driven modules that take the friction out of building and
+running Palworld mods. Rather than solving one specific thing, it bundles the
+plumbing most mods end up re-inventing lifecycle events, cached O(1) object
+lookups, device-aware key glyphs, callback pinning, and native-looking custom
+interact prompts behind one small, consistent API. Require what you need and
+skip the boilerplate.
 
 ## Install
 
