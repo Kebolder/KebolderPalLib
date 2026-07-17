@@ -1,10 +1,11 @@
 name: Release
 
-# Tag a commit to cut a release:  git tag v0.0.3 && git push origin v0.0.3
+# Fires when code lands on main (branch/staging -> main). Reads the version
+# from Lib.VERSION and cuts a release only if that version isn't out yet, so
+# bumping VERSION in KeboldersPalLib.lua is what triggers a new release.
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
 
 permissions:
   contents: write
@@ -15,17 +16,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Package lib + loader
+      - name: Read version from Lib.VERSION
+        id: ver
         run: |
-          zip -r "KeboldersPalLib-${GITHUB_REF_NAME}.zip" \
+          V=$(grep -oP 'VERSION\s*=\s*"\K[0-9]+\.[0-9]+\.[0-9]+' \
+            Mods/shared/KeboldersPalLib/KeboldersPalLib.lua)
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if this version is already released
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v${{ steps.ver.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package lib + loader
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          zip -r "KeboldersPalLib-v${{ steps.ver.outputs.version }}.zip" \
             Mods/shared/KeboldersPalLib \
             Mods/PalLibLoader
 
       - name: Create release
+        if: steps.check.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            "KeboldersPalLib-${GITHUB_REF_NAME}.zip" \
-            --title "KeboldersPalLib $GITHUB_REF_NAME" \
+          gh release create "v${{ steps.ver.outputs.version }}" \
+            "KeboldersPalLib-v${{ steps.ver.outputs.version }}.zip" \
+            --title "KeboldersPalLib v${{ steps.ver.outputs.version }}" \
             --notes-file .github/release-notes.md

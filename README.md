@@ -1,3 +1,5 @@
+<h3 align="center">THIS MOD DOES NOTHING ON ITS OWN — IT IS A LIBRARY FOR OTHER MODS TO USE</h3>
+
 # KeboldersPalLib
 
 Shared [UE4SS](https://github.com/Okaetsu/RE-UE4SS) library for Palworld mods.
