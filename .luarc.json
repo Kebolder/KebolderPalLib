@@ -1,0 +1,30 @@
+{
+    "workspace.library": [
+        "Mods/shared"
+    ],
+    "diagnostics.globals": [
+        "FindAllOf",
+        "FindFirstOf",
+        "StaticFindObject",
+        "StaticConstructObject",
+        "CreateInvalidObject",
+        "RegisterHook",
+        "UnregisterHook",
+        "RegisterCustomEvent",
+        "NotifyOnNewObject",
+        "RegisterKeyBind",
+        "RegisterConsoleCommandHandler",
+        "LoopAsync",
+        "ExecuteAsync",
+        "ExecuteWithDelay",
+        "ExecuteInGameThread",
+        "ForEachUObject",
+        "FName",
+        "FText",
+        "Key",
+        "ModifierKey"
+    ],
+    "diagnostics.disable": [
+        "one-statement-per-line"
+    ]
+}

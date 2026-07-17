@@ -1,0 +1,682 @@
+-- PalPrompt - native-looking custom interact prompts on any interactable's
+-- floating F/V/C list. Rows are appended to the game's own indicator canvas
+-- and synced by hooking its HideIndicators/ShowIndicators cycle; in-range
+-- comes from the player's InteractComponent; the 16ms input loop sleeps
+-- until a prompt is actually on screen.
+--
+--   local PalPrompt = require("KeboldersPalLib.PalPrompt")  -- or Lib.PalPrompt
+--
+--   PalPrompt.new{
+--       target    = PalPrompt.Enum.ItemChest, -- REQUIRED: owner-actor class (generated Enum)
+--       key       = PalPrompt.Key.Y,          -- REQUIRED: key name (generated Key = has glyph)
+--       label     = "Sort",                   -- row text (default "")
+--       mode      = "tap",                    -- "tap" (default) | "hold"
+--       hold_time = 1.0,                      -- hold only: seconds hint for the hold anim
+--       -- callbacks, all optional; each gets the in-range target actor
+--       -- (nil if it despawned the same tick):
+--       on_press   = function(target) end,    -- key down (hold: hold engaged)
+--       on_hold    = function(target) end,    -- hold only: every ~16ms while engaged
+--       on_release = function(target) end,    -- real key-up
+--       on_cancel  = function(target) end,    -- broken WITHOUT key-up (walked away)
+--   }
+--
+--   PalPrompt.Enum / PalPrompt.Key   -- generated enums, re-exported
+--   PalPrompt.PROFILE = true         -- debug: print lib-side work over 2ms
+--
+-- new() returns a handle you can update live (all chainable):
+--   local p = PalPrompt.new{...}
+--   p:setText("Locked")          -- change row text
+--   p:setMode("hold")            -- switch "tap" <-> "hold" (cancels any engage)
+--   p:update{ label = "Open", mode = "tap" }  -- both at once
+--
+-- "hold" honors the "single button press for hold interactions" setting.
+local PalInput = require("KeboldersPalLib.PalInput")
+local PalEvents = require("KeboldersPalLib.PalEvents")
+local Find = require("KeboldersPalLib.PalFind")
+
+local CANVAS_CLASS = "/Game/Pal/Blueprint/UI/WBP_PalInteractiveObjectIndicatorCanvas.WBP_PalInteractiveObjectIndicatorCanvas_C"
+local POOL_SIZE = 4 -- the game's own rows; ours are appended after these
+local PUSH_NAME = "Interact_Push"
+local PUSH_LIT = 0.7
+
+-- ESlateVisibility (UMG_enums.hpp) - 3 is HitTestInvisible, unused here
+local VISIBLE, COLLAPSED, HIDDEN, SELF_HIT_TEST_INVISIBLE = 0, 1, 2, 4
+-- EPalInteractiveObjectButtonType (Pal_enums.hpp) - LongPush_Infinity: hold
+-- arrow with no gauge completion, so holding can't stick it in a "done" state
+local LONG_PUSH_INFINITY = 3
+
+local ROW_FIXUPS = {
+    { "Image_BlockInteract", COLLAPSED },
+    { "InteractArrow",       HIDDEN },
+    { "CanvasPanel_btn",     SELF_HIT_TEST_INVISIBLE },
+    { "Interact_PushEff_00", SELF_HIT_TEST_INVISIBLE, 0.0 },
+    { "Interact_PushEff_01", SELF_HIT_TEST_INVISIBLE, 0.0 },
+}
+
+local M = {}
+
+M.Enum = require("KeboldersPalLib.enums.InteractableEnums")
+M.Key = require("KeboldersPalLib.enums.KeyEnums")
+
+local prompts = {}
+
+local function log(fmt, ...) print("[PalPrompt] " .. string.format(fmt, ...)) end
+
+-- every callback handed to UE4SS must be pinned or it gets GC'd mid-session
+local pin = require("KeboldersPalLib.PalCore").pin
+
+-- PROFILE: print any wrapped body over 2ms (os.clock granularity is 1ms, so
+-- a 1.00 reading is boundary noise, not work). Zero overhead while false, and
+-- returns are passed through either way - profiling must never change behavior.
+M.PROFILE = false
+local function profiled(label, fn)
+    return function(...)
+        if not M.PROFILE then return fn(...) end
+        local t0 = os.clock()
+        local r = table.pack(fn(...))
+        local ms = (os.clock() - t0) * 1000
+        if ms >= 2 then log("PROFILE %s %.2f ms", label, ms) end
+        return table.unpack(r, 1, r.n)
+    end
+end
+
+-- ---------------------------------------------------------------------------
+-- lookups
+-- ---------------------------------------------------------------------------
+Find.watchAll("WBP_PalInteractiveObjectIndicatorCanvas_C", CANVAS_CLASS)
+
+local canvasCache = nil
+-- raw actor refs must never outlive the tick they were fetched in (UE GC)
+local tickTargets = nil -- [target class] = owner actor; CURRENT TICK ONLY
+
+local function resetTickCache()
+    tickTargets = nil
+end
+
+local function getPlayer()
+    return Find.localPlayer()
+end
+
+local function getPC()
+    return Find.localPC()
+end
+
+-- the live transient canvas (hook Context is unusable for no-param UFunctions)
+local function findCanvas()
+    if canvasCache and canvasCache:IsValid() then return canvasCache end
+    canvasCache = nil
+    for _, c in ipairs(Find.allOf("WBP_PalInteractiveObjectIndicatorCanvas_C") or {}) do
+        if c:IsValid() and c:GetFullName():find("/Engine/Transient", 1, true) then
+            canvasCache = c
+            return c
+        end
+    end
+    return nil
+end
+
+local function boxOf(canvas)
+    local b = canvas and canvas:IsValid() and canvas.IndicatorVerticalBox
+    return (b and b:IsValid()) and b or nil
+end
+
+-- in-range entries are interact COMPONENTS; walk outers to the owning actor
+local function ownerActorOf(obj)
+    local o = obj
+    for _ = 1, 8 do
+        if not (o and o:IsValid()) then return nil end
+        if o:IsA("/Script/Engine.Actor") then return o end
+        o = o:GetOuter()
+    end
+    return nil
+end
+
+-- The prompt target matching an owner actor's class. GetFName (bare class
+-- name) not GetFullName - the latter builds the whole outer path per object.
+-- Deliberately not memoized per class address: a GC'd class can be replaced
+-- at the same address, and a stale entry would prompt on the wrong object.
+local function targetOfActor(actor)
+    local cls = actor:GetClass()
+    if not (cls and cls:IsValid()) then return nil end
+    local clsName = cls:GetFName():ToString()
+    for _, p in ipairs(prompts) do
+        if clsName:find(p.target, 1, true) then return p.target end
+    end
+    return nil
+end
+
+-- one pass over the game's own in-range list -> target class -> owner actor
+local function scanTargets()
+    local out = {}
+    local player = getPlayer()
+    if not player then return out end
+    local ic = player.InteractComponent
+    if not ic or not ic:IsValid() then return out end
+    local objs = ic.InteractiveObjects
+    for i = 1, #objs do
+        local obj = objs[i]
+        if obj and obj:IsValid() then
+            local actor = ownerActorOf(obj)
+            if actor then
+                local target = targetOfActor(actor)
+                if target and out[target] == nil then out[target] = actor end
+            end
+        end
+    end
+    return out
+end
+
+local function currentTarget(p)
+    if tickTargets == nil then tickTargets = scanTargets() end
+    return tickTargets[p.target]
+end
+
+-- Find a widget by name inside a row's own widget tree, by hand.
+--
+-- UMG's by-name lookups are unreachable from Lua. UWidgetTree
+-- exposes NO reflected functions at all (only RootWidget/NamedSlotBindings
+-- fields - FindWidget is a C++ template) and GetWidgetFromName isn't in the
+-- reflection dump either, so there is nothing to call. Widgets promoted to
+-- Blueprint variables come back as plain fields (inner.KeyGuide etc.); this
+-- walk is only for the ones that aren't - i.e. Interact_Push.
+--
+-- Only recurses through PanelWidget children, so it stays inside this tree
+-- (a nested UUserWidget has its own WidgetTree and is not descended into).
+-- Depth-bounded; on miss the caller just loses the press highlight.
+local function findDescendantByName(w, wantName, depth)
+    if not (w and w:IsValid()) or depth > 10 then return nil end
+    if w:GetFName():ToString() == wantName then return w end
+    if w:IsA("/Script/UMG.PanelWidget") then -- IsA needs the FULL class path
+        local n = w:GetChildrenCount()
+        for i = 0, n - 1 do
+            local found = findDescendantByName(w:GetChildAt(i), wantName, depth + 1)
+            if found then return found end
+        end
+    end
+    return nil
+end
+
+local function findPushImage(row)
+    local inner = row.WBP_Ingame_Interact
+    local tree = inner and inner:IsValid() and inner.WidgetTree
+    local root = tree and tree:IsValid() and tree.RootWidget
+    if not (root and root:IsValid()) then return nil end
+    return findDescendantByName(root, PUSH_NAME, 0)
+end
+
+-- ---------------------------------------------------------------------------
+-- prompt
+-- ---------------------------------------------------------------------------
+local function fireCb(p, name)
+    local fn = p[name]
+    if fn then
+        local ok, err = pcall(fn, currentTarget(p))
+        if not ok then log("%s callback error: %s", name, tostring(err)) end
+    end
+end
+
+local function setPressFx(p, lit)
+    if p.mode == "hold" then
+        local inner = p.row and p.row:IsValid() and p.row.WBP_Ingame_Interact
+        if not (inner and inner:IsValid()) then return end
+        if lit then
+            inner:AnmEvent_Button_Start(LONG_PUSH_INFINITY, p.hold_time)
+        else
+            inner:AnmEvent_Button_End(LONG_PUSH_INFINITY)
+        end
+    else
+        if p.pushImage and p.pushImage:IsValid() then
+            p.pushImage:SetRenderOpacity(lit and PUSH_LIT or 0.0)
+        end
+    end
+end
+
+local function isToggleInteract(p)
+    if p.mode ~= "hold" then return false end
+    local uiUtil = Find.cdo("/Script/Pal.Default__PalUIUtility")
+    local world = getPlayer()
+    if not (uiUtil and world) then return false end
+    local ok, res = pcall(function() return uiUtil:IsToggleInteract(world) end)
+    return ok and res == true
+end
+
+local function engage(p)
+    p.active = true
+    setPressFx(p, true)
+    fireCb(p, "on_press")
+end
+
+local function disengage(p, cbName)
+    p.active = false
+    setPressFx(p, false)
+    fireCb(p, cbName)
+end
+
+-- push p.label into the live row's text block (game-thread only)
+local function applyLabel(p)
+    local inner = p.row and p.row:IsValid() and p.row.WBP_Ingame_Interact
+    if not (inner and inner:IsValid()) then return end
+    local text = inner.BP_PalTextBlock_C_101
+    if text and text:IsValid() then text:SetText(FText(p.label)) end
+end
+
+local function configureRow(p, template)
+    local row, inner = p.row, p.row.WBP_Ingame_Interact
+    if not (inner and inner:IsValid()) then return false end
+    local srcInner = template and template:IsValid() and template.WBP_Ingame_Interact
+
+    applyLabel(p)
+
+    local kg, srcKg = inner.KeyGuide, srcInner and srcInner.KeyGuide
+    if kg and kg:IsValid() then
+        if srcKg and srcKg:IsValid() then
+            kg:SetInputAction(FName(srcKg.bindActionName.Key:ToString()))
+        end
+        local inputType = PalInput.currentType()
+        local brush = PalInput.forKey(p.key, inputType)
+        if brush and kg.OverrideImageMap then
+            kg.OverrideImageMap:Add(inputType, brush)
+            kg.EnableOverrideImage = true
+            kg:OverrideImage()
+        end
+        if kg.PalUIActionWidgetBase_24 and kg.PalUIActionWidgetBase_24:IsValid() then
+            kg.PalUIActionWidgetBase_24:SetVisibility(SELF_HIT_TEST_INVISIBLE)
+        end
+    end
+
+    for _, fix in ipairs(ROW_FIXUPS) do
+        local w = inner[fix[1]]
+        if w and w:IsValid() then
+            w:SetVisibility(fix[2])
+            if fix[3] then w:SetRenderOpacity(fix[3]) end
+        end
+    end
+    -- hold prompts keep the arrow
+    if p.mode == "hold" and inner.InteractArrow and inner.InteractArrow:IsValid() then
+        inner.InteractArrow:SetVisibility(SELF_HIT_TEST_INVISIBLE)
+    end
+    if inner.RetainerBox_111 and inner.RetainerBox_111:IsValid() then
+        inner.RetainerBox_111:SetRetainRendering(false)
+    end
+    if inner.BackgroundBlur_117 and inner.BackgroundBlur_117:IsValid() then
+        inner.BackgroundBlur_117:SetVisibility(COLLAPSED)
+    end
+
+    inner:SetInteractable(true)
+    inner:SetIsValidInteract(true)
+
+    p.pushImage = findPushImage(row)
+    if p.pushImage then p.pushImage:SetRenderOpacity(0.0) end
+    row:SetVisibility(COLLAPSED)
+    return true
+end
+
+-- rows left from a previous build get reused instead of leaking new ones
+local function orphanedRows(box)
+    local out = {}
+    for i = POOL_SIZE, box:GetChildrenCount() - 1 do
+        local ch = box:GetChildAt(i)
+        if ch and ch:IsValid() then
+            local taken = false
+            for _, p in ipairs(prompts) do
+                if p.row == ch then taken = true break end
+            end
+            if not taken then out[#out + 1] = ch end
+        end
+    end
+    return out
+end
+
+local function ensureBuilt(box)
+    local pending = false
+    for _, p in ipairs(prompts) do
+        if not (p.row and p.row:IsValid()) then pending = true break end
+    end
+    if not pending then return end
+
+    local template = box:GetChildAt(0)
+    local pc = getPC()
+    local wbl = Find.cdo("/Script/UMG.Default__WidgetBlueprintLibrary")
+    if not (template and template:IsValid() and pc and wbl) then return end
+    local orphans, nextOrphan = orphanedRows(box), 1
+
+    for _, p in ipairs(prompts) do
+        if not (p.row and p.row:IsValid()) then
+            local row = orphans[nextOrphan]
+            if row then
+                nextOrphan = nextOrphan + 1
+            else
+                row = wbl:Create(pc, template:GetClass(), pc)
+                if row and row:IsValid() then box:AddChildToVerticalBox(row) end
+            end
+            if row and row:IsValid() then
+                p.row, p.pushImage = row, nil
+                -- an unconfigured row must never be shown: drop it and let the
+                -- next build attempt retry
+                if not configureRow(p, template) then p.row = nil end
+            end
+        end
+    end
+end
+
+local lastShownAt = -math.huge
+local awake = false
+
+local function hideAll()
+    for _, p in ipairs(prompts) do
+        p.inRange = false
+        if p.row and p.row:IsValid() then p.row:SetVisibility(COLLAPSED) end
+    end
+end
+
+local function showInRange(canvas)
+    local box = boxOf(canvas)
+    if not box then return end
+
+    -- fires for EVERY interactable; bail unless one of ours is here
+    local anyHere = false
+    for _, p in ipairs(prompts) do
+        p.inRange = currentTarget(p) ~= nil
+        anyHere = anyHere or p.inRange
+    end
+    if not anyHere then
+        hideAll()
+        return
+    end
+
+    ensureBuilt(box)
+    awake = true
+    lastShownAt = os.clock()
+    for _, p in ipairs(prompts) do
+        if p.row and p.row:IsValid() then
+            if p.inRange then
+                p.row:SetVisibility(VISIBLE)
+                local anim = p.row.Default_In
+                if anim and anim:IsValid() then p.row:PlayAnimationForward(anim, 1.0, false) end
+            else
+                p.row:SetVisibility(COLLAPSED)
+            end
+        end
+    end
+end
+
+local function onHideIndicators()
+    resetTickCache()
+    hideAll()
+end
+
+local function onShowIndicators()
+    resetTickCache()
+    showInRange(findCanvas())
+end
+
+-- ---------------------------------------------------------------------------
+-- lifecycle: driven by PalEvents
+-- ---------------------------------------------------------------------------
+local buildRetries = 0
+local buildScheduled = false
+
+local function tryBuildRows()
+    local box = boxOf(findCanvas())
+    if not box then return false end
+    local template = box:GetChildAt(0)
+    if not (template and template:IsValid() and getPC()) then return false end
+    ensureBuilt(box)
+    return true
+end
+
+-- Pre-build rows during load: the canvas constructs before its child rows
+-- (our template) exist, so retry briefly. Built lazily instead, the widget
+-- Create + configure would hitch the first approach of a target.
+local function buildRowsSoon()
+    if buildScheduled then return end
+    if tryBuildRows() or buildRetries >= 40 then return end
+    buildRetries = buildRetries + 1
+    buildScheduled = true
+    ExecuteWithDelay(250, pin(function()
+        -- delayed callbacks run OFF the game thread; hop back before UE work
+        ExecuteInGameThread(pin(function()
+            buildScheduled = false
+            buildRowsSoon()
+        end))
+    end))
+end
+
+-- fill every cold cache + build rows while loading still hides the cost
+local function prewarm()
+    findCanvas()
+    getPlayer()
+    getPC()
+    for _, p in ipairs(prompts) do
+        if p.key then PalInput.fkey(p.key) end
+    end
+    buildRowsSoon()
+end
+
+-- class-level hooks survive canvases coming and going; class must be loaded
+local hooked = false
+local function ensureHooks()
+    if hooked then return end
+    local okHide = pcall(RegisterHook, CANVAS_CLASS .. ":HideIndicators", pin(profiled("HideIndicators hook", onHideIndicators)))
+    local okShow = pcall(RegisterHook, CANVAS_CLASS .. ":ShowIndicators", pin(profiled("ShowIndicators hook", onShowIndicators)))
+    hooked = okHide and okShow
+end
+
+local function onCanvasCreated(canvas)
+    if canvas:IsValid() and canvas:GetFullName():find("/Engine/Transient", 1, true) then
+        canvasCache = canvas
+    end
+    ensureHooks()
+    if hooked then prewarm() end
+end
+
+-- fires on dedicated servers too; the hooked gate (canvas class = client-only)
+-- keeps servers from paying for any of this
+local function onPlayerSpawned()
+    ensureHooks()
+    if hooked then prewarm() end
+end
+
+-- cancel engagements while objects are alive, then drop every world ref
+local function onWorldUnloading()
+    for _, p in ipairs(prompts) do
+        if p.active then disengage(p, "on_cancel") end
+        p.row, p.pushImage, p.keyStruct = nil, nil, nil
+        p.inRange, p.wasDown = false, false
+    end
+    canvasCache, tickTargets = nil, nil
+    buildRetries = 0
+    Find.reset()
+    awake = false
+end
+
+local bootstrapped = false
+local function bootstrap()
+    if bootstrapped then return end
+    bootstrapped = true
+    PalEvents.onNewObject(CANVAS_CLASS, onCanvasCreated)
+    PalEvents.onPlayerSpawned(onPlayerSpawned)
+    PalEvents.onWorldUnloading(onWorldUnloading)
+    -- hot reload: the world may already exist, no construction event coming
+    ExecuteInGameThread(pin(function()
+        if findCanvas() then
+            ensureHooks()
+            prewarm()
+        end
+    end))
+end
+
+-- ---------------------------------------------------------------------------
+-- input: edge detection per prompt
+-- ---------------------------------------------------------------------------
+local function tickPrompt(p, controller)
+    if not (p.inRange or p.active) then
+        p.wasDown = false
+        return
+    end
+
+    if p.keyStruct == nil and p.key then p.keyStruct = PalInput.fkey(p.key) end
+    if not p.keyStruct then return end
+
+    -- the FKey points into the input-data CDO; a GC pass can invalidate it
+    local ok, isDown = pcall(function() return controller:IsInputKeyDown(p.keyStruct) end)
+    if not ok then
+        p.keyStruct = nil
+        return
+    end
+    local down = isDown and true or false
+
+    if down and not p.wasDown then
+        if p.mode == "hold" and isToggleInteract(p) then
+            if p.active then disengage(p, "on_release")
+            elseif currentTarget(p) then engage(p) end
+        elseif not p.active and currentTarget(p) then
+            engage(p)
+        end
+    elseif p.wasDown and not down then
+        if p.active and not (p.mode == "hold" and isToggleInteract(p)) then
+            disengage(p, "on_release")
+        end
+    end
+    p.wasDown = down
+
+    if p.active then
+        if not currentTarget(p) then
+            disengage(p, "on_cancel")
+        elseif p.mode == "hold" then
+            fireCb(p, "on_hold")
+        end
+    end
+end
+
+local tickBody = profiled("input tick", function()
+    resetTickCache()
+
+    local anyWork = false
+    for _, p in ipairs(prompts) do
+        if p.inRange or p.active then
+            anyWork = true
+            break
+        end
+    end
+    if not anyWork then
+        if (os.clock() - lastShownAt) > 3.0 then
+            awake = false
+            for _, p in ipairs(prompts) do
+                p.keyStruct, p.wasDown = nil, false
+            end
+        end
+        return
+    end
+
+    local controller = getPC()
+    if not controller then return end
+    for _, p in ipairs(prompts) do
+        tickPrompt(p, controller)
+    end
+end)
+
+-- LoopAsync runs on a background thread; UE objects are game-thread only
+local function loopTick()
+    if awake then ExecuteInGameThread(tickBody) end
+    return false
+end
+
+local loopStarted = false
+local function startLoop()
+    if loopStarted then return end
+    loopStarted = true
+    if type(LoopInGameThreadWithDelay) == "function" then
+        -- newer UE4SS: already on the game thread, no per-tick hop
+        LoopInGameThreadWithDelay(16, pin(function()
+            if awake then tickBody() end
+            return false
+        end))
+    else
+        LoopAsync(16, pin(loopTick))
+    end
+end
+
+-- ---------------------------------------------------------------------------
+-- API
+-- ---------------------------------------------------------------------------
+
+-- mode changes the row's visual fixups (arrow, push fx), so a live row must be
+-- rebuilt from the template. Text alone just sets the block.
+local function reconfigureRow(p)
+    local box = boxOf(findCanvas())
+    local template = box and box:GetChildAt(0)
+    if p.row and p.row:IsValid() and template and template:IsValid() then
+        p.pushImage = nil
+        configureRow(p, template)               -- ends COLLAPSED; show cycle re-reveals
+        if p.inRange then p.row:SetVisibility(VISIBLE) end
+    end
+end
+
+-- methods on the handle returned by M.new; all UE work hops to the game thread
+local Prompt = {}
+
+-- update the row text live (nil = leave unchanged)
+function Prompt:setText(label)
+    if label == nil then return self end
+    self.label = label
+    ExecuteInGameThread(pin(function() applyLabel(self) end))
+    return self
+end
+
+-- switch "tap" <-> "hold" live; cancels any in-progress engagement first
+function Prompt:setMode(mode)
+    assert(mode == "tap" or mode == "hold", 'PalPrompt setMode: mode must be "tap" or "hold"')
+    if mode == self.mode then return self end
+    ExecuteInGameThread(pin(function()
+        if self.active then disengage(self, "on_cancel") end
+        self.mode = mode
+        self.wasDown = false
+        reconfigureRow(self)
+    end))
+    return self
+end
+
+-- convenience: update label and/or mode in one call
+function Prompt:update(opts)
+    if opts.label ~= nil then self:setText(opts.label) end
+    if opts.mode ~= nil then self:setMode(opts.mode) end
+    return self
+end
+
+-- Register a prompt (see the header for the full option/callback reference).
+---@alias PromptMode "tap"|"hold"
+---@param opts { target: string, label: string, key: string, mode: PromptMode|nil, hold_time: number|nil, on_press: function|nil, on_hold: function|nil, on_release: function|nil, on_cancel: function|nil }
+function M.new(opts)
+    assert(opts and opts.target, "PalPrompt.new: target required")
+    assert(opts.key, "PalPrompt.new: key required")
+    -- an unrecognized mode would silently behave as "tap"
+    assert(opts.mode == nil or opts.mode == "tap" or opts.mode == "hold",
+        'PalPrompt.new: mode must be "tap" or "hold"')
+
+    local p = {
+        target = opts.target,
+        label = opts.label or "",
+        key = opts.key,
+        mode = opts.mode or "tap",
+        hold_time = opts.hold_time or 1.0,
+        on_press = opts.on_press,
+        on_hold = opts.on_hold,
+        on_release = opts.on_release,
+        on_cancel = opts.on_cancel,
+        row = nil,
+        pushImage = nil,
+        keyStruct = nil,
+        inRange = false,
+        active = false,
+        wasDown = false,
+    }
+    setmetatable(p, { __index = Prompt })
+    prompts[#prompts + 1] = p
+
+    bootstrap()
+    startLoop()
+    if hooked then ExecuteInGameThread(pin(buildRowsSoon)) end
+    return p
+end
+
+return M
