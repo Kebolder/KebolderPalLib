@@ -48,6 +48,11 @@ Start here: **[docs/](docs/Home.md)** — [PalPrompt](docs/PalPrompt.md) is the 
 
 Experimental (`0.0.3`). API may change.
 
+## Contributing
+
+PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Branch off `staging` and
+open PRs against it.
+
 ## License
 
 [Apache 2.0](LICENSE). © 2026 Kebolder.
