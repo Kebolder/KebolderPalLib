@@ -23,18 +23,8 @@ Mods\PalLibLoader\
 
 ## Quickstart
 
-```lua
-local Lib = require("KeboldersPalLib").atLeast("0.0.3")
-
-local p = Lib.PalPrompt.new{
-    target = Lib.Enum.PalBoxV2,   -- what to attach to
-    key    = Lib.Key.Y,           -- prompt key
-    label  = "Sort",
-    on_press = function(target) print("pressed on", target:GetFullName()) end,
-}
-
-p:setText("Sorted")   -- update live
-```
+See the **[Quickstart](https://github.com/Kebolder/KebolderPalLib/wiki/Quickstart)**
+on the wiki.
 
 ## Modules
 
