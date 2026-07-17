@@ -38,6 +38,7 @@ repo are live in-game on the next launch.
 - **Don't bump `VERSION`.** The maintainer sets it when releasing.
 - **Test in-game first.** Say what you tested in the PR.
 - **One concern per PR.** Keep diffs focused.
+- **Work the PR checklist as you go**, ticking each item off as you complete it.
 
 ## Reporting bugs
 

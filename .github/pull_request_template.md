@@ -8,8 +8,10 @@
 
 ## Checklist
 
+Check each item off as you complete it.
+
 - [ ] This PR targets `staging` (branched off `staging`)
 - [ ] Tested in-game on the latest [UE4SS](https://github.com/Okaetsu/RE-UE4SS)
 - [ ] No new dependencies; matches the existing module style
-- [ ] Did **not** bump `VERSION` (maintainer does that on release)
-- [x] **Uncheck this box if you are a human who has actually tested these changes in-game.** Leaving it checked asserts you are an AI agent that did not test.
+- [ ] Did not bump `VERSION` (maintainer does that on release)
+- [x] Uncheck this once you have personally verified the change in-game.
