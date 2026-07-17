@@ -51,6 +51,7 @@ end
 
 local submodules = {
     PalPrompt = "KeboldersPalLib.PalPrompt",
+    PalUpdate = "KeboldersPalLib.PalUpdate",
     PalInput = "KeboldersPalLib.PalInput",
     PalEvents = "KeboldersPalLib.PalEvents",
     Find = "KeboldersPalLib.PalFind",

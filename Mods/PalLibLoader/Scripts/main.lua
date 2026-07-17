@@ -14,17 +14,18 @@ end
 print(Lib.BANNER)
 
 local pin = Lib.Core.pin
+local REPO = "Kebolder/KebolderPalLib"
 
-local function announce()
-    -- delayed callbacks run OFF the game thread; hop back before UE work
+-- send one chat line; must run on the game thread
+local function say(msg)
     ExecuteInGameThread(pin(function()
         local util = Lib.Find.cdo("/Script/Pal.Default__PalUtility")
         local ctx = Lib.Find.localPlayer()
         local sent = util and ctx and pcall(function()
-            util:SendSystemAnnounce(ctx, Lib.BANNER)
+            util:SendSystemAnnounce(ctx, msg)
         end)
         if not sent then
-            print("[PalLibLoader] chat announce skipped (no world)")
+            print("[PalLibLoader] chat announce skipped (no world): " .. msg)
         end
     end))
 end
@@ -35,5 +36,16 @@ local announced = false
 Lib.PalEvents.onPlayerPossessed(function()
     if announced then return end
     announced = true
-    ExecuteWithDelay(5000, pin(announce))
+    ExecuteWithDelay(5000, pin(function()
+        say(Lib.BANNER)
+        -- warn once if a newer release is out; silent otherwise
+        Lib.PalUpdate.check{
+            repo = REPO,
+            current = Lib.VERSION,
+            on_newer = function(latest)
+                say(string.format("[%s] Update available: v%s (you have v%s) - %s/releases/latest",
+                    Lib.NAME, latest, Lib.VERSION, "https://github.com/" .. REPO))
+            end,
+        }
+    end))
 end)
