@@ -11,7 +11,8 @@
 --   Find.watch("Short", "/Full.Path")  -- track a class from construction
 --   Find.watchAll("Short", "/Full.Path") + Find.allOf("Short")
 --                                      -- walk-free FindAllOf replacement
---   Find.reset()                       -- drop caches (world unload)
+--
+-- Caches are dropped automatically on world unload; there is nothing to wire up.
 
 local PalEvents = require("KeboldersPalLib.PalEvents")
 
@@ -146,8 +147,8 @@ function M.localPlayerState()
     return localPS
 end
 
--- drop every cached ref (call from onWorldUnloading); watchers stay armed and
--- the next world's constructions refill everything
+-- drop every cached ref; watchers stay armed and the next world's constructions
+-- refill everything. Wired to world unload below - consumers don't call this.
 function M.reset()
     firstCache, cdoCache = {}, {}
     localPawn, localPC, localPS = nil, nil, nil
@@ -155,5 +156,20 @@ function M.reset()
         allCache[name] = {}
     end
 end
+
+-- Self-wiring: every mod gets its own Lua VM, so leaving this to the consumer
+-- meant each one had to remember it or silently hold dead wrappers for the rest
+-- of the session.
+--
+-- ORDERING: subscribers dispatch in registration order, and this module is
+-- required before anything that uses it, so this reset runs FIRST - before any
+-- other onWorldUnloading subscriber. Lookups after it return nil for the rest of
+-- the teardown: localPlayer/localPC/localPlayerState all need wco(), and wco()
+-- reads a cache this just emptied. Nothing refills until the next world.
+--
+-- That's the intended trade. Teardown handlers are for dropping references, not
+-- for asking the dying world questions. If a handler genuinely needs an object,
+-- it has to capture it before unload, not look it up during.
+PalEvents.onWorldUnloading(M.reset)
 
 return M

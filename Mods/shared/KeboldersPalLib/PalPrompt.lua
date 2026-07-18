@@ -609,7 +609,12 @@ local function onPlayerSpawned()
     if hooked then prewarm() end
 end
 
--- cancel engagements while objects are alive, then drop every world ref
+-- Cancel engagements, then drop every world ref. PalFind resets its own caches
+-- on this event and is registered ahead of us, so lookups are already dead by
+-- the time we run: on_cancel here fires with a nil target. That's within the
+-- callback contract (target is always nil-able) and the world is going away
+-- regardless - a teardown cancel is a "stop what you're doing" signal, not a
+-- chance to touch the object.
 local function onWorldUnloading()
     for _, p in ipairs(prompts) do
         if p.active then disengage(p, "on_cancel") end
@@ -621,7 +626,6 @@ local function onWorldUnloading()
     end
     canvasCache, tickFocus = nil, nil
     buildRetries = 0
-    Find.reset()
     awake = false
 end
 
