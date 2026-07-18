@@ -226,11 +226,13 @@ local function resolveFocus()
 
     -- TScriptInterface: reachable as the object itself, but don't bet the tick on it
     local ok, actor = pcall(function() return ownerActorOf(ic.TargetInteractiveObject) end)
-    local target = ok and actor and targetOfActor(actor)
-    if not target then
+    -- fall back only when there's no focused object at all; a focus that
+    -- resolved to something we have no prompt for (a station's assigned Pal)
+    -- is a real answer, not a miss
+    if not (ok and actor) then
         actor = soleInRange(ic)
-        target = actor and targetOfActor(actor)
     end
+    local target = actor and targetOfActor(actor)
     if not target then return false end
     return { actor = actor, target = target, oid = oidOf(actor) }
 end
