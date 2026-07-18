@@ -428,11 +428,14 @@ end
 -- Re-point the shared row at whatever object is focused right now. Cheap and
 -- idempotent: the oid check makes it a no-op on every tick that didn't change
 -- focus, and only a mode override pays for a template rebuild.
-local function syncRow(p)
+local function syncRow(p, forceLabel)
     local oid = focusedOid(p)
-    if oid == p.appliedOid then return end
-    p.appliedOid = oid
     if not (p.row and p.row:IsValid()) then return end
+    if oid == p.appliedOid then
+        if forceLabel then applyLabel(p) end
+        return
+    end
+    p.appliedOid = oid
     if modeOf(p) ~= p.appliedMode then
         if p.active then disengage(p, "on_cancel") end
         p.wasDown = false
@@ -521,7 +524,7 @@ local function showInRange(canvas)
     for _, p in ipairs(prompts) do
         if p.row and p.row:IsValid() then
             if p.inRange then
-                syncRow(p)  -- focus may have moved to a different object of the same class
+                syncRow(p, true)  -- focus may have moved to a different object of the same class
                 p.row:SetVisibility(VISIBLE)
                 local anim = p.row.Default_In
                 if anim and anim:IsValid() then p.row:PlayAnimationForward(anim, 1.0, false) end
@@ -758,7 +761,11 @@ end
 function Prompt:setText(label, oid)
     if label == nil or self.destroyed then return self end
     if oid then setOverride(self, oid, "label", label) else self.label = label end
-    ExecuteInGameThread(pin(function() applyLabel(self) end))
+    ExecuteInGameThread(pin(function()
+        if oid == nil or oid == focusedOid(self) then
+            applyLabel(self)
+        end
+    end))
     return self
 end
 
@@ -769,6 +776,7 @@ function Prompt:setMode(mode, oid)
     if self.destroyed then return self end
     ExecuteInGameThread(pin(function()
         if oid then setOverride(self, oid, "mode", mode) else self.mode = mode end
+        if oid ~= nil and oid ~= focusedOid(self) then return end
         if modeOf(self) == self.appliedMode then return end
         if self.active then disengage(self, "on_cancel") end
         self.wasDown = false
@@ -782,8 +790,9 @@ function Prompt:clear(oid)
     if self.destroyed then return self end
     if oid then self.overrides[oid] = nil else self.overrides = {} end
     ExecuteInGameThread(pin(function()
+        if oid ~= nil and oid ~= focusedOid(self) then return end
         self.appliedOid = nil -- force the next syncRow to reapply from scratch
-        syncRow(self)
+        syncRow(self, true)
     end))
     return self
 end
