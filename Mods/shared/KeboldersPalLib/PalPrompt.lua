@@ -189,7 +189,10 @@ local function oidOf(actor)
         local ok, g = pcall(function() return actor.ModelInstanceId end)
         hasGuid[key] = (ok and g ~= nil) and true or false
         if hasGuid[key] then
-            return string.format("%x:%x:%x:%x", g.A, g.B, g.C, g.D)
+            -- %08x, not %x: %x drops leading zeros (0x0393F4F6 -> "393f4f6"),
+            -- so an oid rebuilt from the game's own id string wouldn't match.
+            -- Width is a minimum - negative parts still print sign-extended.
+            return string.format("%08x:%08x:%08x:%08x", g.A, g.B, g.C, g.D)
         end
     end
     return actor:GetFName():ToString()
