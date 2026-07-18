@@ -189,9 +189,7 @@ local function oidOf(actor)
         local ok, g = pcall(function() return actor.ModelInstanceId end)
         hasGuid[key] = (ok and g ~= nil) and true or false
         if hasGuid[key] then
-            -- %08x, not %x: %x drops leading zeros (0x0393F4F6 -> "393f4f6"),
-            -- so an oid rebuilt from the game's own id string wouldn't match.
-            -- Width is a minimum - negative parts still print sign-extended.
+            -- %08x not %x: %x drops leading zeros
             return string.format("%08x:%08x:%08x:%08x", g.A, g.B, g.C, g.D)
         end
     end
@@ -226,9 +224,7 @@ local function resolveFocus()
 
     -- TScriptInterface: reachable as the object itself, but don't bet the tick on it
     local ok, actor = pcall(function() return ownerActorOf(ic.TargetInteractiveObject) end)
-    -- fall back only when there's no focused object at all; a focus that
-    -- resolved to something we have no prompt for (a station's assigned Pal)
-    -- is a real answer, not a miss
+    -- fall back only when nothing is focused at all
     if not (ok and actor) then
         actor = soleInRange(ic)
     end
