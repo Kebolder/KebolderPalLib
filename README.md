@@ -46,11 +46,12 @@ Each module's source header has the full option/callback reference.
 
 ## Docs
 
-Start here: **[docs/](docs/Home.md)** — [PalPrompt](docs/PalPrompt.md) is the deep dive.
+Everything lives on the **[wiki](https://github.com/Kebolder/KebolderPalLib/wiki)** —
+[PalPrompt](https://github.com/Kebolder/KebolderPalLib/wiki/PalPrompt) is the deep dive.
 
 ## Status
 
-Experimental (`0.0.3`). API may change.
+Experimental (`0.0.4`). API may change.
 
 ## Contributing
 
