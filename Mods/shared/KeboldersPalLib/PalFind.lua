@@ -11,6 +11,7 @@
 --   Find.watch("Short", "/Full.Path")  -- track a class from construction
 --   Find.watchAll("Short", "/Full.Path") + Find.allOf("Short")
 --                                      -- walk-free FindAllOf replacement
+--   Find.aimed()                       -- actor, oid, hit under the crosshair
 --
 -- Caches are dropped automatically on world unload; there is nothing to wire up.
 
@@ -145,6 +146,43 @@ function M.localPlayerState()
     local s = util:GetLocalPlayerState(ctx)
     if s and s:IsValid() then localPS = s end
     return localPS
+end
+
+-- ---------------------------------------------------------------------------
+-- what the player is looking at
+-- ---------------------------------------------------------------------------
+
+-- Camera-forward line trace. Returns actor, oid, hit - all nil if nothing was
+-- hit, so `local a = Find.aimed()` is a valid one-liner.
+--
+-- UE 5.1 hit-actor path is HitResult.HitObjectHandle.Actor:Get(); 5.4+ moved it
+-- to .ReferenceObject, so this stays a pcall rather than a version check.
+local UEHelpers   -- required lazily: PalFind loads before UEHelpers is needed
+function M.aimed(maxDistance)
+    local pc = M.localPC()
+    if not (pc and pc:IsValid()) then return nil end
+    UEHelpers = UEHelpers or require("UEHelpers")
+
+    local cam = pc.PlayerCameraManager
+    if not (cam and cam:IsValid()) then return nil end
+    local from = cam:GetCameraLocation()
+    local fwd = UEHelpers.GetKismetMathLibrary():GetForwardVector(cam:GetCameraRotation())
+    local reach = maxDistance or 50000
+    local hit = {}
+    local ok = UEHelpers.GetKismetSystemLibrary():LineTraceSingle(
+        pc.Pawn, from,
+        { X = from.X + fwd.X * reach, Y = from.Y + fwd.Y * reach, Z = from.Z + fwd.Z * reach },
+        0, false, {}, 0, hit, true,
+        { R = 0, G = 0, B = 0, A = 0 }, { R = 0, G = 0, B = 0, A = 0 }, 0.0)
+    if not ok then return nil end
+
+    local actor
+    pcall(function() actor = hit.HitObjectHandle.Actor:Get() end)
+    if not (actor and actor:IsValid()) then
+        pcall(function() actor = hit.HitObjectHandle.ReferenceObject:Get() end)
+    end
+    if not (actor and actor:IsValid()) then return nil, nil, hit end
+    return actor, require("KeboldersPalLib.PalCore").oidOf(actor), hit
 end
 
 -- drop every cached ref; watchers stay armed and the next world's constructions

@@ -174,27 +174,9 @@ local function targetOfActor(actor)
     return nil
 end
 
--- Stable identity for one object. Map objects (chests, crushers, everything
--- placeable) carry a ModelInstanceId guid that survives save/load; anything
--- else falls back to the actor's instance name - unique per session only.
--- Which classes expose the guid is memoized BY CLASS NAME so a miss costs one
--- pcall per class, not one per tick (a class address could be recycled by GC,
--- a name can't be recycled into something with a different property set).
-local hasGuid = {}
-local function oidOf(actor)
-    if not (actor and actor:IsValid()) then return nil end
-    local cls = actor:GetClass()
-    local key = (cls and cls:IsValid()) and cls:GetFName():ToString() or "?"
-    if hasGuid[key] ~= false then
-        local ok, g = pcall(function() return actor.ModelInstanceId end)
-        hasGuid[key] = (ok and g ~= nil) and true or false
-        if hasGuid[key] then
-            -- %08x not %x: %x drops leading zeros
-            return string.format("%08x:%08x:%08x:%08x", g.A, g.B, g.C, g.D)
-        end
-    end
-    return actor:GetFName():ToString()
-end
+-- Stable per-object identity now lives in PalCore - PalWorldDroppedItem and the
+-- conveyor need the same keys, and three copies of it was two too many.
+local oidOf = require("KeboldersPalLib.PalCore").oidOf
 
 -- Exactly one in-range object matching a registered target, or nil if none or
 -- several. Only used as a fallback, so ambiguity means "no idea" - guessing is

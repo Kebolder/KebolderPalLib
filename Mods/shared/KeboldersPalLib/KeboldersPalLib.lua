@@ -11,6 +11,8 @@
 --                  onPlayerPossessed/onWorldUnloading)
 --   Lib.Find       cached object lookups; localPlayer()/localPC() are O(1)
 --                  and multiplayer-correct - never walk the object array
+--   Lib.DroppedItem  spawn REAL ground drop items from any container, and
+--                  inspect/modify any drop lying in the world
 --   Lib.Core       pin (UE4SS callback pinning) + valid (IsValid-or-nil)
 --   Lib.Enum       generated: interactable target classes
 --   Lib.Key        generated: keys with guaranteed keyboard glyphs
@@ -54,6 +56,7 @@ local submodules = {
     PalInput = "KeboldersPalLib.PalInput",
     PalEvents = "KeboldersPalLib.PalEvents",
     Find = "KeboldersPalLib.PalFind",
+    DroppedItem = "KeboldersPalLib.PalWorldDroppedItem",
     Core = "KeboldersPalLib.PalCore",
     Enum = "KeboldersPalLib.enums.InteractableEnums",
     Key = "KeboldersPalLib.enums.KeyEnums",
