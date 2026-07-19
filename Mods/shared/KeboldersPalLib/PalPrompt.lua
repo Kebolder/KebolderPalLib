@@ -10,14 +10,18 @@
 --       key       = PalPrompt.Key.Y,          -- REQUIRED: key name (generated Key = has glyph)
 --       label     = "Sort",                   -- row text (default "")
 --       mode      = "tap",                    -- "tap" (default) | "hold"
---       hold_time = 1.0,                      -- hold only: seconds hint for the hold anim
+--       hold_time = 0.5,                      -- hold only: seconds the key must be
+--                                             -- held before the hold engages
 --       -- callbacks, all optional; each gets the FOCUSED target actor (nil if
 --       -- it despawned the same tick) and that object's oid (see below):
---       on_press   = function(target, oid) end, -- key down (hold: hold engaged)
---       on_hold    = function(target, oid) end, -- hold only: every ~16ms while engaged
---       on_release = function(target, oid) end, -- real key-up
+--       on_hold    = function(target, oid) end, -- hold only: every ~16ms once hold_time elapsed
+--       on_release = function(target, oid) end, -- real key-up; a tap prompt's action goes here
 --       on_cancel  = function(target, oid) end, -- broken WITHOUT key-up (walked away)
 --   }
+--
+--   Key-down lights the press highlight in BOTH modes. In "hold" the arrow anim
+--   and on_hold only start once hold_time has elapsed, so releasing early is
+--   just a highlight blink and an on_release.
 --
 --   target is live and must NOT outlive the tick (UE GC); oid is a plain
 --   string, safe to keep in a table across ticks and saves.
@@ -266,21 +270,21 @@ local function fireCb(p, name)
     end
 end
 
--- uses p.appliedMode not modeOf(p): object vanishing must still stop the arrow
--- anim, but modeOf() has no focus left to read by then
-local function setPressFx(p, lit)
-    if p.appliedMode == "hold" then
-        local inner = p.row and p.row:IsValid() and p.row.WBP_Ingame_Interact
-        if not (inner and inner:IsValid()) then return end
-        if lit then
-            inner:AnmEvent_Button_Start(LONG_PUSH_INFINITY, p.hold_time)
-        else
-            inner:AnmEvent_Button_End(LONG_PUSH_INFINITY)
-        end
+-- key-down highlight, both modes
+local function setPushFx(p, lit)
+    if p.pushImage and p.pushImage:IsValid() then
+        p.pushImage:SetRenderOpacity(lit and PUSH_LIT or 0.0)
+    end
+end
+
+-- hold only, and only after hold_time has elapsed
+local function setArrowFx(p, on)
+    local inner = p.row and p.row:IsValid() and p.row.WBP_Ingame_Interact
+    if not (inner and inner:IsValid()) then return end
+    if on then
+        inner:AnmEvent_Button_Start(LONG_PUSH_INFINITY, p.hold_time)
     else
-        if p.pushImage and p.pushImage:IsValid() then
-            p.pushImage:SetRenderOpacity(lit and PUSH_LIT or 0.0)
-        end
+        inner:AnmEvent_Button_End(LONG_PUSH_INFINITY)
     end
 end
 
@@ -298,13 +302,16 @@ local function engage(p)
     -- pins the engaged object: panning to a different chest mid-hold
     -- must cancel, not finish the hold on the wrong one
     p.activeOid = focusedOid(p)
-    setPressFx(p, true)
-    fireCb(p, "on_press")
+    p.engagedAt = os.clock()
+    p.holdFired = false
+    setPushFx(p, true)
 end
 
 local function disengage(p, cbName)
     p.active = false
-    setPressFx(p, false)
+    if p.holdFired then setArrowFx(p, false) end
+    p.holdFired = false
+    setPushFx(p, false)
     fireCb(p, cbName)
 end
 
@@ -615,14 +622,16 @@ local function tickPrompt(p, controller)
     local down = isDown and true or false
 
     if down and not p.wasDown then
-        if isToggleInteract(p) then
-            if p.active then disengage(p, "on_release")
-            elseif currentTarget(p) then engage(p) end
-        elseif not p.active and currentTarget(p) then
+        -- a second press only matters for a toggle-hold that HAS engaged
+        -- (holdFired); before the gate, toggle behaves as a normal hold
+        if p.active then
+            if p.holdFired and isToggleInteract(p) then disengage(p, "on_release") end
+        elseif currentTarget(p) then
             engage(p)
         end
     elseif p.wasDown and not down then
-        if p.active and not isToggleInteract(p) then
+        -- key-up stops it, unless an engaged toggle-hold has it latched
+        if p.active and not (p.holdFired and isToggleInteract(p)) then
             disengage(p, "on_release")
         end
     end
@@ -631,7 +640,13 @@ local function tickPrompt(p, controller)
     if p.active then
         if not currentTarget(p) or focusedOid(p) ~= p.activeOid then
             disengage(p, "on_cancel")
-        elseif p.appliedMode == "hold" then
+        elseif p.appliedMode == "hold" and (os.clock() - p.engagedAt) >= p.hold_time then
+            -- crossing the gate swaps the tap highlight for the arrow anim, once
+            if not p.holdFired then
+                p.holdFired = true
+                setPushFx(p, false)
+                setArrowFx(p, true)
+            end
             fireCb(p, "on_hold")
         end
     end
@@ -782,7 +797,6 @@ end
 ---@field key string
 ---@field mode PromptMode|nil
 ---@field hold_time number|nil
----@field on_press function|nil
 ---@field on_hold function|nil
 ---@field on_release function|nil
 ---@field on_cancel function|nil
@@ -800,7 +814,6 @@ function M.new(opts)
         key = opts.key,
         mode = opts.mode or "tap",
         hold_time = opts.hold_time or 1.0,
-        on_press = opts.on_press,
         on_hold = opts.on_hold,
         on_release = opts.on_release,
         on_cancel = opts.on_cancel,
@@ -814,6 +827,8 @@ function M.new(opts)
         inRange = false,
         active = false,
         wasDown = false,
+        engagedAt = 0,
+        holdFired = false,
         destroyed = false,
     }
     nextId = nextId + 1
