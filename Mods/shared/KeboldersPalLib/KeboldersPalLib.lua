@@ -17,8 +17,7 @@
 --   Lib.Enum       generated: interactable target classes
 --   Lib.Key        generated: keys with guaranteed keyboard glyphs
 --
--- NOTE: UE4SS gives every mod its own Lua VM. Shared means shared FILES -
--- each consuming mod gets its own instance of everything here.
+-- NOTE: each mod gets its own Lua VM - "shared" means shared FILES, not shared state.
 
 local Lib = {
     NAME = "KeboldersPalLib",
@@ -28,9 +27,7 @@ local Lib = {
 
 Lib.BANNER = string.format("[%s] Version %s - %s", Lib.NAME, Lib.VERSION, Lib.STAGE)
 
--- Assert the installed lib is at least `min` (e.g. "x.x.x"). Returns Lib so a
--- consumer can gate + capture in one line:
---   local Lib = require("KeboldersPalLib").atLeast("x.x.x")
+-- Assert the installed lib is at least `min` (e.g. "x.x.x"); returns Lib for chaining.
 function Lib.atLeast(min)
     local function parts(v)
         local t = {}
