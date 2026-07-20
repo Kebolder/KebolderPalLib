@@ -51,7 +51,7 @@ Everything lives on the **[wiki](https://github.com/Kebolder/KebolderPalLib/wiki
 
 ## Status
 
-Experimental (`0.0.5`). API may change.
+Experimental (`0.0.7`). API may change — see [CHANGELOG.md](CHANGELOG.md).
 
 ## Contributing
 

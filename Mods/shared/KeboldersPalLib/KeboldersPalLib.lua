@@ -21,7 +21,7 @@
 
 local Lib = {
     NAME = "KeboldersPalLib",
-    VERSION = "0.0.7c",
+    VERSION = "0.0.7",
     STAGE = "Experimental",
 }
 
