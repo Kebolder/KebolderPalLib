@@ -11,24 +11,23 @@
 --                  onPlayerPossessed/onWorldUnloading)
 --   Lib.Find       cached object lookups; localPlayer()/localPC() are O(1)
 --                  and multiplayer-correct - never walk the object array
+--   Lib.DroppedItem  spawn REAL ground drop items from any container, and
+--                  inspect/modify any drop lying in the world
 --   Lib.Core       pin (UE4SS callback pinning) + valid (IsValid-or-nil)
 --   Lib.Enum       generated: interactable target classes
 --   Lib.Key        generated: keys with guaranteed keyboard glyphs
 --
--- NOTE: UE4SS gives every mod its own Lua VM. Shared means shared FILES -
--- each consuming mod gets its own instance of everything here.
+-- NOTE: each mod gets its own Lua VM - "shared" means shared FILES, not shared state.
 
 local Lib = {
     NAME = "KeboldersPalLib",
-    VERSION = "0.0.5",
+    VERSION = "0.0.7",
     STAGE = "Experimental",
 }
 
 Lib.BANNER = string.format("[%s] Version %s - %s", Lib.NAME, Lib.VERSION, Lib.STAGE)
 
--- Assert the installed lib is at least `min` (e.g. "x.x.x"). Returns Lib so a
--- consumer can gate + capture in one line:
---   local Lib = require("KeboldersPalLib").atLeast("x.x.x")
+-- Assert the installed lib is at least `min` (e.g. "x.x.x"); returns Lib for chaining.
 function Lib.atLeast(min)
     local function parts(v)
         local t = {}
@@ -54,6 +53,7 @@ local submodules = {
     PalInput = "KeboldersPalLib.PalInput",
     PalEvents = "KeboldersPalLib.PalEvents",
     Find = "KeboldersPalLib.PalFind",
+    DroppedItem = "KeboldersPalLib.PalWorldDroppedItem",
     Core = "KeboldersPalLib.PalCore",
     Enum = "KeboldersPalLib.enums.InteractableEnums",
     Key = "KeboldersPalLib.enums.KeyEnums",

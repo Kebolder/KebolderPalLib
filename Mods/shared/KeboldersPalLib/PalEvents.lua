@@ -22,8 +22,8 @@ local function dispatch(name, subs, ...)
     end
 end
 
--- one NotifyOnNewObject per class path, fanned out to all subscribers.
--- classPath must be a full path; the class does NOT need to be loaded yet.
+-- One NotifyOnNewObject per class path; fanned out to all subscribers.
+-- classPath must be full path; class need not be loaded yet.
 local newObjectSubs = {}
 
 function M.onNewObject(classPath, fn)
@@ -38,14 +38,13 @@ function M.onNewObject(classPath, fn)
     subs[#subs + 1] = fn
 end
 
--- a player pawn constructed (world load, respawn) - in multiplayer this
--- includes OTHER players' pawns
+-- fires on pawn construction (world load/respawn); in MP includes other players' pawns
 function M.onPlayerSpawned(fn)
     M.onNewObject("/Script/Pal.PalPlayerCharacter", fn)
 end
 
--- controller possessed a pawn -> (controller, pawn). The "player is actually
--- ready" signal; unlike ClientRestart it also fires on dedicated servers.
+-- controller possessed a pawn -> (controller, pawn).
+-- Fires on dedicated servers too, unlike ClientRestart.
 local possessSubs = {}
 local possessHooked = false
 function M.onPlayerPossessed(fn)

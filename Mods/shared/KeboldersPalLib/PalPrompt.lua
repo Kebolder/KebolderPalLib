@@ -1,8 +1,7 @@
 -- PalPrompt - native-looking custom interact prompts on any interactable's
--- floating F/V/C list. Rows are appended to the game's own indicator canvas
--- and synced by hooking its HideIndicators/ShowIndicators cycle; in-range
--- comes from the player's InteractComponent; the 16ms input loop sleeps
--- until a prompt is actually on screen.
+-- floating F/V/C list. Rows append to the game's own indicator canvas, synced
+-- via its HideIndicators/ShowIndicators hooks; in-range comes from the
+-- player's InteractComponent; the 16ms input loop sleeps until a prompt is on screen.
 --
 --   local PalPrompt = require("KeboldersPalLib.PalPrompt")  -- or Lib.PalPrompt
 --
@@ -10,15 +9,23 @@
 --       target    = PalPrompt.Enum.ItemChest, -- REQUIRED: owner-actor class (generated Enum)
 --       key       = PalPrompt.Key.Y,          -- REQUIRED: key name (generated Key = has glyph)
 --       label     = "Sort",                   -- row text (default "")
---       mode      = "tap",                    -- "tap" (default) | "hold"
---       hold_time = 1.0,                      -- hold only: seconds hint for the hold anim
+--       mode      = "tap",                    -- "tap" (default) | "hold" | "timed"
+--       hold_time = 0.5,                      -- timed only: seconds the gauge takes to fill
 --       -- callbacks, all optional; each gets the FOCUSED target actor (nil if
 --       -- it despawned the same tick) and that object's oid (see below):
---       on_press   = function(target, oid) end, -- key down (hold: hold engaged)
---       on_hold    = function(target, oid) end, -- hold only: every ~16ms while engaged
---       on_release = function(target, oid) end, -- real key-up
---       on_cancel  = function(target, oid) end, -- broken WITHOUT key-up (walked away)
+--       on_hold     = function(target, oid) end, -- hold only: every ~16ms while held
+--       on_complete = function(target, oid) end, -- timed only: ONCE when the gauge fills
+--       on_release  = function(target, oid) end, -- real key-up; a tap prompt's action goes here
+--       on_cancel   = function(target, oid) end, -- broken WITHOUT key-up (walked away)
 --   }
+--
+--   Three modes:
+--     "tap"   - glyph highlight; acts on key-up (on_release).
+--     "hold"  - engages instantly; arrow anim + on_hold every ~16ms while held.
+--               For continuous "while held" work. hold_time is ignored.
+--     "timed" - the gauge behind the glyph fills over hold_time from key-down;
+--               on_complete fires ONCE at the top, then idles until key-up.
+--               Release before the top rewinds the fill.
 --
 --   target is live and must NOT outlive the tick (UE GC); oid is a plain
 --   string, safe to keep in a table across ticks and saves.
@@ -29,7 +36,7 @@
 -- new() returns a handle you can update live (all chainable):
 --   local p = PalPrompt.new{...}
 --   p:setText("Locked")          -- change row text
---   p:setMode("hold")            -- switch "tap" <-> "hold" (cancels any engage)
+--   p:setMode("hold")            -- switch mode (cancels any engage)
 --   p:update{ label = "Open", mode = "tap" }  -- both at once
 --   p:destroy()                  -- unregister; the row is recycled, not leaked
 --
@@ -56,15 +63,14 @@ local PalEvents = require("KeboldersPalLib.PalEvents")
 local Find = require("KeboldersPalLib.PalFind")
 
 local CANVAS_CLASS = "/Game/Pal/Blueprint/UI/WBP_PalInteractiveObjectIndicatorCanvas.WBP_PalInteractiveObjectIndicatorCanvas_C"
-local POOL_SIZE = 4 -- the game's own rows; ours are appended after these
+local POOL_SIZE = 4 -- game's own rows; ours append after these
 local PUSH_NAME = "Interact_Push"
 local PUSH_LIT = 0.7
 
--- ESlateVisibility (UMG_enums) - 3 is HitTestInvisible, unused here
+-- ESlateVisibility (UMG_enums)
 local VISIBLE, COLLAPSED, HIDDEN, SELF_HIT_TEST_INVISIBLE = 0, 1, 2, 4
--- EPalInteractiveObjectButtonType (Pal_enums) - LongPush_Infinity: hold
--- arrow with no gauge completion, so holding can't stick it in a "done" state
-local LONG_PUSH_INFINITY = 3
+local LONG_PUSH_INFINITY = 3 -- EPalInteractiveObjectButtonType: arrow, no gauge (hold)
+local PLAY_FORWARD = 0 -- EUMGSequencePlayMode
 
 local ROW_FIXUPS = {
     { "Image_BlockInteract", COLLAPSED },
@@ -84,13 +90,10 @@ local nextId = 0
 
 local function log(fmt, ...) print("[PalPrompt] " .. string.format(fmt, ...)) end
 
--- every callback handed to UE4SS must be pinned or it gets GC'd mid-session
+-- callbacks handed to UE4SS must be pinned or they get GC'd mid-session
 local pin = require("KeboldersPalLib.PalCore").pin
 
--- PROFILE: print any wrapped body over 2ms (os.clock granularity is 1ms, so
--- a 1.00 reading is boundary noise, not work). Zero overhead while false, and
--- returns are passed through either way - profiling must never change behavior.
-M.PROFILE = false
+M.PROFILE = false -- logs wrapped bodies over 2ms; zero overhead while false
 local function profiled(label, fn)
     return function(...)
         if not M.PROFILE then return fn(...) end
@@ -102,21 +105,16 @@ local function profiled(label, fn)
     end
 end
 
--- ---------------------------------------------------------------------------
--- lookups
--- ---------------------------------------------------------------------------
 Find.watchAll("WBP_PalInteractiveObjectIndicatorCanvas_C", CANVAS_CLASS)
 
 local canvasCache = nil
--- raw actor refs must never outlive the tick they were fetched in (UE GC)
 local tickFocus = nil -- nil = unresolved, false = nothing focused, else {actor,target,oid}
 
 local function resetTickCache()
     tickFocus = nil
 end
 
--- two UE4SS wrappers of the same UObject are DIFFERENT tables, so == on them
--- is a coin flip; compare the addresses they point at
+-- two UE4SS wrappers of the same UObject are different tables; compare addresses
 local function sameObj(a, b)
     if not (a and b) then return false end
     if not (a:IsValid() and b:IsValid()) then return false end
@@ -131,7 +129,7 @@ local function getPC()
     return Find.localPC()
 end
 
--- the live transient canvas (hook Context is unusable for no-param UFunctions)
+-- live transient canvas; hook Context is unusable for no-param UFunctions
 local function findCanvas()
     if canvasCache and canvasCache:IsValid() then return canvasCache end
     canvasCache = nil
@@ -149,7 +147,7 @@ local function boxOf(canvas)
     return (b and b:IsValid()) and b or nil
 end
 
--- in-range entries are interact COMPONENTS; walk outers to the owning actor
+-- in-range entries are interact components; walk outers to the owning actor
 local function ownerActorOf(obj)
     local o = obj
     for _ = 1, 8 do
@@ -160,10 +158,6 @@ local function ownerActorOf(obj)
     return nil
 end
 
--- The prompt target matching an owner actor's class. GetFName (bare class
--- name) not GetFullName - the latter builds the whole outer path per object.
--- Deliberately not memoized per class address: a GC'd class can be replaced
--- at the same address, and a stale entry would prompt on the wrong object.
 local function targetOfActor(actor)
     local cls = actor:GetClass()
     if not (cls and cls:IsValid()) then return nil end
@@ -174,30 +168,10 @@ local function targetOfActor(actor)
     return nil
 end
 
--- Stable identity for one object. Map objects (chests, crushers, everything
--- placeable) carry a ModelInstanceId guid that survives save/load; anything
--- else falls back to the actor's instance name - unique per session only.
--- Which classes expose the guid is memoized BY CLASS NAME so a miss costs one
--- pcall per class, not one per tick (a class address could be recycled by GC,
--- a name can't be recycled into something with a different property set).
-local hasGuid = {}
-local function oidOf(actor)
-    if not (actor and actor:IsValid()) then return nil end
-    local cls = actor:GetClass()
-    local key = (cls and cls:IsValid()) and cls:GetFName():ToString() or "?"
-    if hasGuid[key] ~= false then
-        local ok, g = pcall(function() return actor.ModelInstanceId end)
-        hasGuid[key] = (ok and g ~= nil) and true or false
-        if hasGuid[key] then
-            return string.format("%x:%x:%x:%x", g.A, g.B, g.C, g.D)
-        end
-    end
-    return actor:GetFName():ToString()
-end
+-- shared with PalWorldDroppedItem/conveyor, which need the same oid keys
+local oidOf = require("KeboldersPalLib.PalCore").oidOf
 
--- Exactly one in-range object matching a registered target, or nil if none or
--- several. Only used as a fallback, so ambiguity means "no idea" - guessing is
--- what made two crushers share one prompt in the first place.
+-- fallback: exactly one in-range match, or nil on ambiguity
 local function soleInRange(ic)
     local objs, found = ic.InteractiveObjects, nil
     for i = 1, #objs do
@@ -213,21 +187,18 @@ local function soleInRange(ic)
     return found
 end
 
--- THE object the game is prompting for. TargetInteractiveObject is the focused
--- one; InteractiveObjects is merely everything in range, so keying on that list
--- fires on the wrong crusher whenever two are within reach of each other.
+-- key on TargetInteractiveObject (focused), not InteractiveObjects (in range)
 local function resolveFocus()
     local player = getPlayer()
     local ic = player and player.InteractComponent
     if not (ic and ic:IsValid()) then return false end
 
-    -- TScriptInterface: reachable as the object itself, but don't bet the tick on it
+    -- TScriptInterface access can throw; don't bet the tick on it
     local ok, actor = pcall(function() return ownerActorOf(ic.TargetInteractiveObject) end)
-    local target = ok and actor and targetOfActor(actor)
-    if not target then
+    if not (ok and actor) then
         actor = soleInRange(ic)
-        target = actor and targetOfActor(actor)
     end
+    local target = actor and targetOfActor(actor)
     if not target then return false end
     return { actor = actor, target = target, oid = oidOf(actor) }
 end
@@ -242,7 +213,6 @@ local function currentTarget(p)
     return (f and f.target == p.target) and f.actor or nil
 end
 
--- the focused object's oid, but only if it belongs to THIS prompt's target
 local function focusedOid(p)
     local f = focus()
     return (f and f.target == p.target) and f.oid or nil
@@ -263,22 +233,11 @@ local function modeOf(p)
     return (o and o.mode) or p.mode
 end
 
--- Find a widget by name inside a row's own widget tree, by hand.
---
--- UMG's by-name lookups are unreachable from Lua. UWidgetTree
--- exposes NO reflected functions at all (only RootWidget/NamedSlotBindings
--- fields - FindWidget is a C++ template) and GetWidgetFromName isn't in the
--- reflection dump either, so there is nothing to call. Widgets promoted to
--- Blueprint variables come back as plain fields (inner.KeyGuide etc.); this
--- walk is only for the ones that aren't - i.e. Interact_Push.
---
--- Only recurses through PanelWidget children, so it stays inside this tree
--- (a nested UUserWidget has its own WidgetTree and is not descended into).
--- Depth-bounded; on miss the caller just loses the press highlight.
+-- manual walk: UWidgetTree has no reflected FindWidget; depth-bounded
 local function findDescendantByName(w, wantName, depth)
     if not (w and w:IsValid()) or depth > 10 then return nil end
     if w:GetFName():ToString() == wantName then return w end
-    if w:IsA("/Script/UMG.PanelWidget") then -- IsA needs the FULL class path
+    if w:IsA("/Script/UMG.PanelWidget") then -- IsA needs the full class path
         local n = w:GetChildrenCount()
         for i = 0, n - 1 do
             local found = findDescendantByName(w:GetChildAt(i), wantName, depth + 1)
@@ -296,9 +255,6 @@ local function findPushImage(row)
     return findDescendantByName(root, PUSH_NAME, 0)
 end
 
--- ---------------------------------------------------------------------------
--- prompt
--- ---------------------------------------------------------------------------
 local function fireCb(p, name)
     local fn = p[name]
     if fn then
@@ -307,23 +263,70 @@ local function fireCb(p, name)
     end
 end
 
--- p.appliedMode, not modeOf(p): the row is physically built as one mode, and a
--- hold that ends because the object vanished must still take the hold branch to
--- stop the arrow anim - by then modeOf() has no focus left to read an override from
-local function setPressFx(p, lit)
-    if p.appliedMode == "hold" then
-        local inner = p.row and p.row:IsValid() and p.row.WBP_Ingame_Interact
-        if not (inner and inner:IsValid()) then return end
-        if lit then
-            inner:AnmEvent_Button_Start(LONG_PUSH_INFINITY, p.hold_time)
-        else
-            inner:AnmEvent_Button_End(LONG_PUSH_INFINITY)
-        end
-    else
-        if p.pushImage and p.pushImage:IsValid() then
-            p.pushImage:SetRenderOpacity(lit and PUSH_LIT or 0.0)
-        end
+-- key-down glyph highlight (tap/timed)
+local function setPushFx(p, lit)
+    if p.pushImage and p.pushImage:IsValid() then
+        p.pushImage:SetRenderOpacity(lit and PUSH_LIT or 0.0)
     end
+end
+
+-- hold: the game-driven arrow anim (no gauge)
+local function startArrowFx(p)
+    local inner = p.row and p.row:IsValid() and p.row.WBP_Ingame_Interact
+    if not (inner and inner:IsValid()) then return end
+    inner:AnmEvent_Button_Start(LONG_PUSH_INFINITY, p.hold_time)
+end
+
+local function endArrowFx(p)
+    local inner = p.row and p.row:IsValid() and p.row.WBP_Ingame_Interact
+    if not (inner and inner:IsValid()) then return end
+    inner:AnmEvent_Button_End(LONG_PUSH_INFINITY)
+end
+
+-- timed drives the gauge + arrow anims directly for deterministic fill/reverse/snap
+local TIMED_ANMS = { "Anm_Push_long", "Anm_Push_long_Arrow" }
+
+local function eachTimedAnm(p, fn)
+    local inner = p.row and p.row:IsValid() and p.row.WBP_Ingame_Interact
+    if not (inner and inner:IsValid()) then return end
+    for _, name in ipairs(TIMED_ANMS) do
+        local anm = inner[name]
+        if anm and anm:IsValid() then fn(inner, anm) end
+    end
+end
+
+-- gauge fills scaled to hold_time; arrow plays once at 1x then holds its last frame
+local function gaugeFill(p)
+    local inner = p.row and p.row:IsValid() and p.row.WBP_Ingame_Interact
+    if not (inner and inner:IsValid()) then return end
+    local gauge = inner.Anm_Push_long
+    if gauge and gauge:IsValid() then
+        local dur = 0
+        pcall(function() dur = gauge:GetEndTime() end)
+        local speed = (dur > 0 and p.hold_time > 0) and (dur / p.hold_time) or 1.0
+        pcall(function() inner:PlayAnimation(gauge, 0.0, 1, PLAY_FORWARD, speed, false) end)
+    end
+    local arrow = inner.Anm_Push_long_Arrow
+    if arrow and arrow:IsValid() then
+        pcall(function() inner:PlayAnimation(arrow, 0.0, 1, PLAY_FORWARD, 1.0, false) end)
+    end
+end
+
+-- rewind to empty at natural (1x) speed
+local function gaugeReverse(p)
+    eachTimedAnm(p, function(inner, anm)
+        pcall(function() inner:PlayAnimationReverse(anm, 1.0, false) end)
+    end)
+end
+
+-- snap to frame 0 (original spot) and freeze
+local function gaugeSnap(p)
+    eachTimedAnm(p, function(inner, anm)
+        pcall(function()
+            inner:PlayAnimation(anm, 0.0, 1, PLAY_FORWARD, 1.0, false)
+            inner:StopAnimation(anm)
+        end)
+    end)
 end
 
 local function isToggleInteract(p)
@@ -337,22 +340,36 @@ end
 
 local function engage(p)
     p.active = true
-    -- pin the object this engagement belongs to: panning from chest1 to chest2
-    -- mid-hold must cancel, not silently finish the hold on the other chest
+    -- pin the engaged object so panning away cancels, not finishes on the wrong one
     p.activeOid = focusedOid(p)
-    setPressFx(p, true)
-    fireCb(p, "on_press")
+    p.engagedAt = os.clock()
+    if p.appliedMode == "timed" then
+        p.holdFired = false -- true when the gauge completes
+        gaugeFill(p)
+        setPushFx(p, true)
+    elseif p.appliedMode == "hold" then
+        -- instant engage; holdFired now so the toggle-latch applies from the start
+        p.holdFired = true
+        startArrowFx(p)
+    else -- tap
+        p.holdFired = false
+        setPushFx(p, true)
+    end
 end
 
 local function disengage(p, cbName)
     p.active = false
-    setPressFx(p, false)
+    if p.appliedMode == "hold" then
+        endArrowFx(p)
+    elseif p.appliedMode == "timed" then
+        if p.holdFired then gaugeSnap(p) else gaugeReverse(p) end -- completed vs early release
+    end
+    p.holdFired = false
+    setPushFx(p, false)
     fireCb(p, cbName)
 end
 
--- push the focused object's label into the live row's text block (game-thread
--- only). One row is shared by every object of the target class, so this is what
--- makes chest #1 read "Locked" while chest #2 still reads "Open".
+-- shared row shows the focused object's (possibly overridden) label
 local function applyLabel(p)
     local inner = p.row and p.row:IsValid() and p.row.WBP_Ingame_Interact
     if not (inner and inner:IsValid()) then return end
@@ -392,9 +409,12 @@ local function configureRow(p, template)
             if fix[3] then w:SetRenderOpacity(fix[3]) end
         end
     end
-    -- hold prompts keep the arrow
-    if mode == "hold" and inner.InteractArrow and inner.InteractArrow:IsValid() then
-        inner.InteractArrow:SetVisibility(SELF_HIT_TEST_INVISIBLE)
+    if (mode == "hold" or mode == "timed") and inner.InteractArrow and inner.InteractArrow:IsValid() then
+        inner.InteractArrow:SetVisibility(SELF_HIT_TEST_INVISIBLE) -- arrow shows while idle
+    end
+    if mode == "timed" then
+        inner:SetVisibilityLongPushParts(SELF_HIT_TEST_INVISIBLE) -- arrow lives inside; keep visible
+        gaugeSnap(p) -- start empty
     end
     if inner.RetainerBox_111 and inner.RetainerBox_111:IsValid() then
         inner.RetainerBox_111:SetRetainRendering(false)
@@ -413,26 +433,26 @@ local function configureRow(p, template)
     return true
 end
 
--- mode changes the row's visual fixups (arrow, push fx), so a live row must be
--- rebuilt from the template. Text alone just sets the block.
+-- rebuild the row from template on a mode change
 local function reconfigureRow(p)
     local box = boxOf(findCanvas())
     local template = box and box:GetChildAt(0)
     if p.row and p.row:IsValid() and template and template:IsValid() then
         p.pushImage = nil
-        configureRow(p, template)               -- ends COLLAPSED; show cycle re-reveals
+        configureRow(p, template) -- ends COLLAPSED; show cycle re-reveals
         if p.inRange then p.row:SetVisibility(VISIBLE) end
     end
 end
 
--- Re-point the shared row at whatever object is focused right now. Cheap and
--- idempotent: the oid check makes it a no-op on every tick that didn't change
--- focus, and only a mode override pays for a template rebuild.
-local function syncRow(p)
+-- re-point the shared row at the focused object; rebuild only on a mode change
+local function syncRow(p, forceLabel)
     local oid = focusedOid(p)
-    if oid == p.appliedOid then return end
-    p.appliedOid = oid
     if not (p.row and p.row:IsValid()) then return end
+    if oid == p.appliedOid then
+        if forceLabel then applyLabel(p) end
+        return
+    end
+    p.appliedOid = oid
     if modeOf(p) ~= p.appliedMode then
         if p.active then disengage(p, "on_cancel") end
         p.wasDown = false
@@ -442,7 +462,7 @@ local function syncRow(p)
     end
 end
 
--- rows left from a previous build get reused instead of leaking new ones
+-- reuse rows from a previous build instead of leaking new ones
 local function orphanedRows(box)
     local out = {}
     for i = POOL_SIZE, box:GetChildrenCount() - 1 do
@@ -482,8 +502,7 @@ local function ensureBuilt(box)
             end
             if row and row:IsValid() then
                 p.row, p.pushImage = row, nil
-                -- an unconfigured row must never be shown: drop it and let the
-                -- next build attempt retry
+                -- never show an unconfigured row: drop it, next build retries
                 if not configureRow(p, template) then p.row = nil end
             end
         end
@@ -504,7 +523,7 @@ local function showInRange(canvas)
     local box = boxOf(canvas)
     if not box then return end
 
-    -- fires for EVERY interactable; bail unless one of ours is here
+    -- fires for every interactable; bail unless one of ours is here
     local anyHere = false
     for _, p in ipairs(prompts) do
         p.inRange = currentTarget(p) ~= nil
@@ -521,7 +540,7 @@ local function showInRange(canvas)
     for _, p in ipairs(prompts) do
         if p.row and p.row:IsValid() then
             if p.inRange then
-                syncRow(p)  -- focus may have moved to a different object of the same class
+                syncRow(p, true)  -- focus may have moved to a different object of the same class
                 p.row:SetVisibility(VISIBLE)
                 local anim = p.row.Default_In
                 if anim and anim:IsValid() then p.row:PlayAnimationForward(anim, 1.0, false) end
@@ -542,9 +561,6 @@ local function onShowIndicators()
     showInRange(findCanvas())
 end
 
--- ---------------------------------------------------------------------------
--- lifecycle: driven by PalEvents
--- ---------------------------------------------------------------------------
 local buildRetries = 0
 local buildScheduled = false
 
@@ -557,16 +573,14 @@ local function tryBuildRows()
     return true
 end
 
--- Pre-build rows during load: the canvas constructs before its child rows
--- (our template) exist, so retry briefly. Built lazily instead, the widget
--- Create + configure would hitch the first approach of a target.
+-- pre-build during load; the canvas exists before its rows, so retry briefly
 local function buildRowsSoon()
     if buildScheduled then return end
     if tryBuildRows() or buildRetries >= 40 then return end
     buildRetries = buildRetries + 1
     buildScheduled = true
     ExecuteWithDelay(250, pin(function()
-        -- delayed callbacks run OFF the game thread; hop back before UE work
+        -- delayed callbacks run off the game thread; hop back before UE work
         ExecuteInGameThread(pin(function()
             buildScheduled = false
             buildRowsSoon()
@@ -574,7 +588,7 @@ local function buildRowsSoon()
     end))
 end
 
--- fill every cold cache + build rows while loading still hides the cost
+-- fills cold caches + builds rows while loading still hides the cost
 local function prewarm()
     findCanvas()
     getPlayer()
@@ -602,26 +616,19 @@ local function onCanvasCreated(canvas)
     if hooked then prewarm() end
 end
 
--- fires on dedicated servers too; the hooked gate (canvas class = client-only)
--- keeps servers from paying for any of this
+-- fires on dedicated servers too; hooked gate keeps them out (canvas is client-only)
 local function onPlayerSpawned()
     ensureHooks()
     if hooked then prewarm() end
 end
 
--- Cancel engagements, then drop every world ref. PalFind resets its own caches
--- on this event and is registered ahead of us, so lookups are already dead by
--- the time we run: on_cancel here fires with a nil target. That's within the
--- callback contract (target is always nil-able) and the world is going away
--- regardless - a teardown cancel is a "stop what you're doing" signal, not a
--- chance to touch the object.
+-- caches are dead here; on_cancel fires with nil target (within contract)
 local function onWorldUnloading()
     for _, p in ipairs(prompts) do
         if p.active then disengage(p, "on_cancel") end
         p.row, p.pushImage, p.keyStruct = nil, nil, nil
         p.inRange, p.wasDown = false, false
-        -- overrides are keyed by ModelInstanceId, which survives the reload;
-        -- what's applied to a now-dead row does not
+        -- overrides survive reload (ModelInstanceId); what's applied to a dead row doesn't
         p.appliedOid, p.appliedMode, p.activeOid = nil, p.mode, nil
     end
     canvasCache, tickFocus = nil, nil
@@ -645,16 +652,12 @@ local function bootstrap()
     end))
 end
 
--- ---------------------------------------------------------------------------
--- input: edge detection per prompt
--- ---------------------------------------------------------------------------
 local function tickPrompt(p, controller)
     if not (p.inRange or p.active) then
         p.wasDown = false
         return
     end
-    -- the show/hide cycle doesn't necessarily fire when the player pans from one
-    -- chest to the next, so the row is re-pointed here too (no-op if unchanged)
+    -- panning chest to chest doesn't always fire show/hide; re-point here too
     if p.inRange and not p.active then syncRow(p) end
 
     if p.keyStruct == nil and p.key then p.keyStruct = PalInput.fkey(p.key) end
@@ -669,14 +672,15 @@ local function tickPrompt(p, controller)
     local down = isDown and true or false
 
     if down and not p.wasDown then
-        if isToggleInteract(p) then
-            if p.active then disengage(p, "on_release")
-            elseif currentTarget(p) then engage(p) end
-        elseif not p.active and currentTarget(p) then
+        -- second press only matters for a latched toggle-hold; else just engage
+        if p.active then
+            if p.holdFired and isToggleInteract(p) then disengage(p, "on_release") end
+        elseif currentTarget(p) then
             engage(p)
         end
     elseif p.wasDown and not down then
-        if p.active and not isToggleInteract(p) then
+        -- key-up stops it, unless an engaged toggle-hold has it latched
+        if p.active and not (p.holdFired and isToggleInteract(p)) then
             disengage(p, "on_release")
         end
     end
@@ -686,7 +690,14 @@ local function tickPrompt(p, controller)
         if not currentTarget(p) or focusedOid(p) ~= p.activeOid then
             disengage(p, "on_cancel")
         elseif p.appliedMode == "hold" then
-            fireCb(p, "on_hold")
+            fireCb(p, "on_hold") -- instant, every tick while held
+        elseif p.appliedMode == "timed" and (os.clock() - p.engagedAt) >= p.hold_time then
+            -- gauge full: fire once, snap back to original this frame, idle until key-up
+            if not p.holdFired then
+                p.holdFired = true
+                fireCb(p, "on_complete")
+                gaugeSnap(p)
+            end
         end
     end
 end
@@ -739,36 +750,36 @@ local function startLoop()
     end
 end
 
--- ---------------------------------------------------------------------------
--- API
--- ---------------------------------------------------------------------------
-
 -- methods on the handle returned by M.new; all UE work hops to the game thread
 local Prompt = {}
 
 local function setOverride(p, oid, field, value)
     local o = p.overrides[oid] or {}
     o[field] = value
-    -- an override with nothing left in it would keep the oid alive forever
+    -- an empty override would keep the oid alive forever
     p.overrides[oid] = (o.label or o.mode) and o or nil
 end
 
--- Update the row text live (nil = leave unchanged). With an oid, only THAT
--- object gets the new text; without one, the prompt's default changes.
+-- set row text live (nil = unchanged); with oid, only that object
 function Prompt:setText(label, oid)
     if label == nil or self.destroyed then return self end
     if oid then setOverride(self, oid, "label", label) else self.label = label end
-    ExecuteInGameThread(pin(function() applyLabel(self) end))
+    ExecuteInGameThread(pin(function()
+        if oid == nil or oid == focusedOid(self) then
+            applyLabel(self)
+        end
+    end))
     return self
 end
 
--- Switch "tap" <-> "hold" live; cancels any in-progress engagement first.
--- With an oid, only that object switches.
+-- switch mode live, cancelling any engagement; with oid, only that object
 function Prompt:setMode(mode, oid)
-    assert(mode == "tap" or mode == "hold", 'PalPrompt setMode: mode must be "tap" or "hold"')
+    assert(mode == "tap" or mode == "hold" or mode == "timed",
+        'PalPrompt setMode: mode must be "tap", "hold", or "timed"')
     if self.destroyed then return self end
     ExecuteInGameThread(pin(function()
         if oid then setOverride(self, oid, "mode", mode) else self.mode = mode end
+        if oid ~= nil and oid ~= focusedOid(self) then return end
         if modeOf(self) == self.appliedMode then return end
         if self.active then disengage(self, "on_cancel") end
         self.wasDown = false
@@ -777,26 +788,26 @@ function Prompt:setMode(mode, oid)
     return self
 end
 
--- Drop one object's overrides, or every object's when oid is nil.
+-- drops one object's overrides, or all when oid is nil
 function Prompt:clear(oid)
     if self.destroyed then return self end
     if oid then self.overrides[oid] = nil else self.overrides = {} end
     ExecuteInGameThread(pin(function()
+        if oid ~= nil and oid ~= focusedOid(self) then return end
         self.appliedOid = nil -- force the next syncRow to reapply from scratch
-        syncRow(self)
+        syncRow(self, true)
     end))
     return self
 end
 
--- convenience: update label and/or mode in one call (opts.oid scopes both)
+-- updates label and/or mode in one call (opts.oid scopes both)
 function Prompt:update(opts)
     if opts.label ~= nil then self:setText(opts.label, opts.oid) end
     if opts.mode ~= nil then self:setMode(opts.mode, opts.oid) end
     return self
 end
 
--- This prompt's 1-based position among the MODDED rows in the indicator box
--- (the game's own POOL_SIZE rows are skipped). nil until the row is built.
+-- 1-based slot among modded rows; nil until the row is built
 function Prompt:slot()
     local box = boxOf(findCanvas())
     if not (box and self.row and self.row:IsValid()) then return nil end
@@ -806,15 +817,11 @@ function Prompt:slot()
     return nil
 end
 
--- Unregister. The row is left in the box collapsed rather than removed:
--- orphanedRows() hands it to the next new() instead of leaking a fresh widget,
--- and nobody else's slot number shifts.
+-- row is recycled (left collapsed), not removed; no slot numbers shift
 function Prompt:destroy()
     if self.destroyed then return self end
     self.destroyed = true
-    -- unregister and release the row in ONE game-thread step: split across
-    -- threads, orphanedRows could re-let the row to a new prompt in the gap and
-    -- then have our cleanup collapse it out from under the new owner
+    -- unregister + release the row in one game-thread step
     ExecuteInGameThread(pin(function()
         for i, q in ipairs(prompts) do
             if q == self then table.remove(prompts, i) break end
@@ -829,14 +836,23 @@ function Prompt:destroy()
 end
 
 -- Register a prompt (see the header for the full option/callback reference).
----@alias PromptMode "tap"|"hold"
----@param opts { target: string, label: string, key: string, mode: PromptMode|nil, hold_time: number|nil, on_press: function|nil, on_hold: function|nil, on_release: function|nil, on_cancel: function|nil }
+---@alias PromptMode "tap"|"hold"|"timed"
+---@class PromptOpts
+---@field target string
+---@field label string
+---@field key string
+---@field mode PromptMode|nil
+---@field hold_time number|nil
+---@field on_hold function|nil
+---@field on_complete function|nil
+---@field on_release function|nil
+---@field on_cancel function|nil
+---@param opts PromptOpts
 function M.new(opts)
     assert(opts and opts.target, "PalPrompt.new: target required")
     assert(opts.key, "PalPrompt.new: key required")
-    -- an unrecognized mode would silently behave as "tap"
-    assert(opts.mode == nil or opts.mode == "tap" or opts.mode == "hold",
-        'PalPrompt.new: mode must be "tap" or "hold"')
+    assert(opts.mode == nil or opts.mode == "tap" or opts.mode == "hold" or opts.mode == "timed",
+        'PalPrompt.new: mode must be "tap", "hold", or "timed"')
 
     local p = {
         target = opts.target,
@@ -844,8 +860,8 @@ function M.new(opts)
         key = opts.key,
         mode = opts.mode or "tap",
         hold_time = opts.hold_time or 1.0,
-        on_press = opts.on_press,
         on_hold = opts.on_hold,
+        on_complete = opts.on_complete,
         on_release = opts.on_release,
         on_cancel = opts.on_cancel,
         overrides = {},   -- [oid] = { label =, mode = }
@@ -858,6 +874,8 @@ function M.new(opts)
         inRange = false,
         active = false,
         wasDown = false,
+        engagedAt = 0,
+        holdFired = false,
         destroyed = false,
     }
     nextId = nextId + 1
@@ -871,8 +889,7 @@ function M.new(opts)
     return p
 end
 
--- identity string for any actor; pass it back to setText/setMode/clear
-M.oidOf = oidOf
+M.oidOf = oidOf -- identity string for any actor; pass to setText/setMode/clear
 
 -- oid of whatever the game is currently prompting for, nil if nothing
 function M.focusedOid()
@@ -887,9 +904,7 @@ function M.get(id)
     return nil
 end
 
--- every modded row currently in the indicator box, keyed by slot. label/mode
--- are the EFFECTIVE values for the focused object, so this doubles as a
--- readout of what the player is looking at right now.
+-- every modded row by slot; label/mode are the effective (focused) values
 function M.slots()
     local out = {}
     for _, p in ipairs(prompts) do
