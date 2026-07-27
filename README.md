@@ -1,19 +1,21 @@
-<h3 align="center">THIS MOD DOES NOTHING ON ITS OWN — IT IS A LIBRARY FOR OTHER MODS TO USE</h3>
+<h3 align="center">THIS MOD DOES NOTHING ON ITS OWN. IT IS A LIBRARY FOR OTHER MODS TO USE.</h3>
 
 # KeboldersPalLib
 
-Shared [UE4SS](https://github.com/Okaetsu/RE-UE4SS) library for Palworld mods.
+An assortment of modules and helpers for building Palworld mods, on top of
+[UE4SS](https://github.com/Okaetsu/RE-UE4SS).
 
 > ⚠️ **Experimental.** APIs are prone to change, break, and crash. If you hit a
 > crash while using the lib, please [open an issue](https://github.com/Kebolder/KebolderPalLib/issues/new)
 > and attach your crash files from `%LocalAppData%\Pal\Saved\Crashes`.
 
-A collection of Lua-driven modules that take the friction out of building and
-running Palworld mods. Rather than solving one specific thing, it bundles the
-plumbing most mods end up re-inventing lifecycle events, cached O(1) object
-lookups, device-aware key glyphs, callback pinning, and native-looking custom
-interact prompts behind one small, consistent API. Require what you need and
-skip the boilerplate.
+This isn't one feature with a wrapper around it. It's a set of separate modules,
+each solving a piece of plumbing that mods otherwise end up rebuilding
+themselves: lifecycle events, cached object lookups, device-aware key glyphs,
+callback pinning, spawning real ground drops, and native-looking custom interact
+prompts.
+
+They're independent. Require the ones you want and ignore the rest.
 
 ## Install
 
@@ -26,36 +28,33 @@ Mods\PalLibLoader\
 
 `PalLibLoader` just confirms the lib is installed and prints a banner in chat.
 
-## Quickstart
+## Use it
 
-See the **[Quickstart](https://github.com/Kebolder/KebolderPalLib/wiki/Quickstart)**
-on the wiki.
+```lua
+local Lib = require("KeboldersPalLib").atLeast("0.0.8")
+```
 
-## Modules
+Then see the **[Quickstart](https://github.com/Kebolder/KebolderPalLib/wiki/Quickstart)**
+for a working prompt in about ten lines.
 
-| `Lib.X`     | What |
-|-------------|------|
-| `PalPrompt` | custom interact prompts on the native F/V/C list |
-| `PalInput`  | device-aware key glyphs + FKey lookups |
-| `PalEvents` | lifecycle events (player spawned/possessed, world unloading, new object) |
-| `Find`      | cached lookups; `localPlayer()`/`localPC()` are O(1) and multiplayer-correct |
-| `Core`      | `pin` (callback pinning) + `valid` |
-| `Enum` / `Key` | generated interactable classes + keys with guaranteed glyphs |
+## What's in it
 
-Each module's source header has the full option/callback reference.
+See **[Modules](https://github.com/Kebolder/KebolderPalLib/wiki/Modules)** for
+the full list and what each one is for.
 
 ## Docs
 
-Everything lives on the **[wiki](https://github.com/Kebolder/KebolderPalLib/wiki)** —
-[PalPrompt](https://github.com/Kebolder/KebolderPalLib/wiki/PalPrompt) is the deep dive.
+Everything lives on the **[wiki](https://github.com/Kebolder/KebolderPalLib/wiki)**.
+[PalPrompt](https://github.com/Kebolder/KebolderPalLib/wiki/PalPrompt) is the
+deep dive if you want to see how far one module goes.
 
 ## Status
 
-Experimental (`0.0.7`). API may change — see [CHANGELOG.md](CHANGELOG.md).
+Experimental (`0.0.8`). The API may still change. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Contributing
 
-PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Branch off `staging` and
+PRs welcome, see [CONTRIBUTING.md](CONTRIBUTING.md). Branch off `staging` and
 open PRs against it.
 
 ## License
