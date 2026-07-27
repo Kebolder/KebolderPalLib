@@ -5,6 +5,7 @@
 --   local brush, fkey = PalInput.forKey("Y")       -- current device, kbd fallback
 --   local brush       = PalInput.forCombo({"LeftControl", "E"})
 --   local fkey        = PalInput.fkey("Y")         -- keyboard FKey (IsInputKeyDown)
+--   local fkey        = PalInput.fkey("Gamepad_DPad_Left", PalInput.GAMEPAD)
 --   local t           = PalInput.currentType()     -- 0 kbd, 1 gamepad, 2 touch
 --   PalInput.onChanged(function(newType) end)      -- fires on device switch
 --
@@ -16,6 +17,7 @@ local Find = require("KeboldersPalLib.PalFind")
 local M = {}
 
 local MOUSE_KEYBOARD, GAMEPAD = 0, 1 -- ECommonInputType
+M.MOUSE_KEYBOARD, M.GAMEPAD = MOUSE_KEYBOARD, GAMEPAD
 
 Find.watch("CommonInputSubsystem", "/Script/CommonInput.CommonInputSubsystem")
 
@@ -34,6 +36,9 @@ local function currentGamepadName()
     return (ok and n and n:ToString()) or ""
 end
 
+-- GetCurrentGamepadName() is "" for a plain XInput pad, so exact match can miss
+local GENERIC_GAMEPAD = "Generic"
+
 local cdoCache = {}
 local function resolveCDO(inputType, gamepadName)
     local cacheKey = tostring(inputType) .. ":" .. (gamepadName or "")
@@ -43,34 +48,44 @@ local function resolveCDO(inputType, gamepadName)
     local settings = FindFirstOf("CommonInputPlatformSettings")
     if not settings or not settings:IsValid() then return nil end
     local classes = settings.ControllerDataClasses
+
+    local exact, generic, any = nil, nil, nil
     for i = 1, #classes do
         local cls = classes[i]
         if cls and cls:IsValid() then
             local path = cls:GetFullName():match("%S+%s+(.*)")
             local cdo = path and StaticFindObject(path:gsub("([^%.]+)$", "Default__%1"))
             if cdo and cdo:IsValid() and cdo.InputType == inputType then
-                if inputType ~= GAMEPAD or cdo.GamepadName:ToString() == gamepadName then
-                    cdoCache[cacheKey] = cdo
-                    return cdo
+                if inputType ~= GAMEPAD then
+                    exact = cdo
+                    break
                 end
+                local name = cdo.GamepadName:ToString()
+                if name == gamepadName then exact = cdo; break end
+                if name == GENERIC_GAMEPAD then generic = generic or cdo end
+                any = any or cdo
             end
         end
     end
-    return nil
+    local cdo = exact or generic or any
+    if cdo then cdoCache[cacheKey] = cdo end
+    return cdo
 end
 
 local function cdoForType(inputType)
     return resolveCDO(inputType, inputType == GAMEPAD and currentGamepadName() or "")
 end
 
-local keyIndexCache = setmetatable({}, { __mode = "k" })
+-- keyed by address: two wrappers of one CDO are different tables
+local keyIndexCache = {}
 
 local function lookupKey(cdo, wantName)
     local arr = cdo.InputBrushDataMap
-    local map = keyIndexCache[cdo]
+    local id = cdo:GetAddress()
+    local map = keyIndexCache[id]
     if not map then
         map = {}
-        keyIndexCache[cdo] = map
+        keyIndexCache[id] = map
     end
     local j = map[wantName]
     if j then
@@ -89,14 +104,23 @@ local function lookupKey(cdo, wantName)
     return nil
 end
 
+-- the game's own resolver; picks the right per-brand pad art internally
+local function iconByKey(fkey, inputType)
+    local util, ctx = Find.cdo("/Script/Pal.Default__PalUIUtility"), Find.wco()
+    if not (util and ctx) then return nil end
+    local ok, brush = pcall(function() return util:GetKeyIconByKey(ctx, fkey, inputType) end)
+    return ok and brush or nil
+end
+
 -- brush (+ FKey) for a key on the current device, keyboard glyph as fallback
 function M.forKey(keyName, inputType)
     inputType = inputType or M.currentType()
     local cdo = cdoForType(inputType)
     if cdo then
         local b, k = lookupKey(cdo, keyName)
-        if b then return b, k end
+        if k then return iconByKey(k, inputType) or b, k end
     end
+    -- this device has no such key (e.g. a keyboard name while on a pad)
     if inputType ~= MOUSE_KEYBOARD then
         local kb = resolveCDO(MOUSE_KEYBOARD, "")
         if kb then return lookupKey(kb, keyName) end
@@ -106,14 +130,18 @@ end
 
 local missingKeys = {}
 
-function M.fkey(keyName)
-    if missingKeys[keyName] then return nil end
-    local kb = resolveCDO(MOUSE_KEYBOARD, "")
-    if not kb then return nil end
-    local _, k = lookupKey(kb, keyName)
+-- FKey for polling (IsInputKeyDown); inputType defaults to keyboard
+function M.fkey(keyName, inputType)
+    inputType = inputType or MOUSE_KEYBOARD
+    local cacheId = tostring(inputType) .. ":" .. tostring(keyName)
+    if missingKeys[cacheId] then return nil end
+    local cdo = cdoForType(inputType)
+    if not cdo then return nil end
+    local _, k = lookupKey(cdo, keyName)
     if not k then
-        missingKeys[keyName] = true
-        print("[InputIcons] key '" .. tostring(keyName) .. "' has no keyboard entry; input for it won't work")
+        missingKeys[cacheId] = true
+        print("[InputIcons] key '" .. tostring(keyName) .. "' has no entry for input type "
+            .. tostring(inputType) .. "; input for it won't work")
     end
     return k
 end
@@ -157,5 +185,12 @@ function M.onChanged(fn)
             end))
     end
 end
+
+-- drop dead CDO wrappers + the permanent negative cache on a map change
+function M.reset()
+    cdoCache, keyIndexCache, missingKeys = {}, {}, {}
+end
+
+require("KeboldersPalLib.PalEvents").onWorldUnloading(M.reset)
 
 return M
