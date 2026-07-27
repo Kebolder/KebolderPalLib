@@ -16,12 +16,13 @@
 --   Lib.Core       pin (UE4SS callback pinning) + valid (IsValid-or-nil)
 --   Lib.Enum       generated: interactable target classes
 --   Lib.Key        generated: keys with guaranteed keyboard glyphs
+--   Lib.GamepadKey generated: gamepad keys with guaranteed glyphs (F10 in catalog_writer)
 --
 -- NOTE: each mod gets its own Lua VM - "shared" means shared FILES, not shared state.
 
 local Lib = {
     NAME = "KeboldersPalLib",
-    VERSION = "0.0.7",
+    VERSION = "0.0.8",
     STAGE = "Experimental",
 }
 
@@ -57,6 +58,7 @@ local submodules = {
     Core = "KeboldersPalLib.PalCore",
     Enum = "KeboldersPalLib.enums.InteractableEnums",
     Key = "KeboldersPalLib.enums.KeyEnums",
+    GamepadKey = "KeboldersPalLib.enums.GamepadKeyEnums",
 }
 
 setmetatable(Lib, {

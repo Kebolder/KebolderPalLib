@@ -7,7 +7,8 @@
 --
 --   PalPrompt.new{
 --       target    = PalPrompt.Enum.ItemChest, -- REQUIRED: owner-actor class (generated Enum)
---       key       = PalPrompt.Key.Y,          -- REQUIRED: key name (generated Key = has glyph)
+--       key       = PalPrompt.Key.Y,          -- REQUIRED: key name, or a two-device table:
+--       -- { keyboard = Key.Y, gamepad = GamepadKey.Gamepad_DPad_Left }
 --       label     = "Sort",                   -- row text (default "")
 --       mode      = "tap",                    -- "tap" (default) | "hold" | "timed"
 --       hold_time = 0.5,                      -- timed only: seconds the gauge takes to fill
@@ -30,8 +31,7 @@
 --   target is live and must NOT outlive the tick (UE GC); oid is a plain
 --   string, safe to keep in a table across ticks and saves.
 --
---   PalPrompt.Enum / PalPrompt.Key   -- generated enums, re-exported
---   PalPrompt.PROFILE = true         -- debug: print lib-side work over 2ms
+--   PalPrompt.Enum / PalPrompt.Key / PalPrompt.GamepadKey -- generated, re-exported
 --
 -- new() returns a handle you can update live (all chainable):
 --   local p = PalPrompt.new{...}
@@ -84,6 +84,7 @@ local M = {}
 
 M.Enum = require("KeboldersPalLib.enums.InteractableEnums")
 M.Key = require("KeboldersPalLib.enums.KeyEnums")
+M.GamepadKey = require("KeboldersPalLib.enums.GamepadKeyEnums")
 
 local prompts = {}
 local nextId = 0
@@ -92,18 +93,6 @@ local function log(fmt, ...) print("[PalPrompt] " .. string.format(fmt, ...)) en
 
 -- callbacks handed to UE4SS must be pinned or they get GC'd mid-session
 local pin = require("KeboldersPalLib.PalCore").pin
-
-M.PROFILE = false -- logs wrapped bodies over 2ms; zero overhead while false
-local function profiled(label, fn)
-    return function(...)
-        if not M.PROFILE then return fn(...) end
-        local t0 = os.clock()
-        local r = table.pack(fn(...))
-        local ms = (os.clock() - t0) * 1000
-        if ms >= 2 then log("PROFILE %s %.2f ms", label, ms) end
-        return table.unpack(r, 1, r.n)
-    end
-end
 
 Find.watchAll("WBP_PalInteractiveObjectIndicatorCanvas_C", CANVAS_CLASS)
 
@@ -168,10 +157,8 @@ local function targetOfActor(actor)
     return nil
 end
 
--- shared with PalWorldDroppedItem/conveyor, which need the same oid keys
 local oidOf = require("KeboldersPalLib.PalCore").oidOf
 
--- fallback: exactly one in-range match, or nil on ambiguity
 local function soleInRange(ic)
     local objs, found = ic.InteractiveObjects, nil
     for i = 1, #objs do
@@ -233,7 +220,6 @@ local function modeOf(p)
     return (o and o.mode) or p.mode
 end
 
--- manual walk: UWidgetTree has no reflected FindWidget; depth-bounded
 local function findDescendantByName(w, wantName, depth)
     if not (w and w:IsValid()) or depth > 10 then return nil end
     if w:GetFName():ToString() == wantName then return w end
@@ -377,6 +363,45 @@ local function applyLabel(p)
     if text and text:IsValid() then text:SetText(FText(labelOf(p))) end
 end
 
+-- KeyGuide re-resolves on device switch; both map slots make it land on ours
+local function applyGlyph(p, srcKg)
+    local inner = p.row and p.row:IsValid() and p.row.WBP_Ingame_Interact
+    local kg = inner and inner:IsValid() and inner.KeyGuide
+    if not (kg and kg:IsValid()) then return end
+
+    if srcKg and srcKg:IsValid() then
+        kg:SetInputAction(FName(srcKg.bindActionName.Key:ToString()))
+    end
+
+    local kbBrush = p.key and PalInput.forKey(p.key, PalInput.MOUSE_KEYBOARD)
+    local gpBrush = PalInput.forKey(p.gamepad_key or p.key, PalInput.GAMEPAD)
+
+    if kg.OverrideImageMap and (kbBrush or gpBrush) then
+        if kbBrush then kg.OverrideImageMap:Add(PalInput.MOUSE_KEYBOARD, kbBrush) end
+        if gpBrush then kg.OverrideImageMap:Add(PalInput.GAMEPAD, gpBrush) end
+        kg.EnableOverrideImage = true
+        pcall(function() kg:OverrideImage() end)
+    end
+
+    local action = kg.PalUIActionWidgetBase_24
+    local now = (PalInput.currentType() == PalInput.GAMEPAD) and gpBrush or kbBrush
+    if now and action and action:IsValid() then
+        pcall(function() action:OverrideImage(now) end)
+    end
+end
+
+-- re-applies every built row's glyph for the newly active device
+local function applyGlyphs()
+    for _, p in ipairs(prompts) do
+        if p.row and p.row:IsValid() then applyGlyph(p) end
+    end
+end
+
+-- pinned once, not per switch; delayed so the native icon listener runs first
+local applyGlyphsPinned = pin(applyGlyphs)
+local hopToGameThread = pin(function() ExecuteInGameThread(applyGlyphsPinned) end)
+local onDeviceChanged = pin(function() ExecuteWithDelay(50, hopToGameThread) end)
+
 local function configureRow(p, template)
     local row, inner = p.row, p.row.WBP_Ingame_Interact
     if not (inner and inner:IsValid()) then return false end
@@ -385,22 +410,8 @@ local function configureRow(p, template)
 
     applyLabel(p)
 
-    local kg, srcKg = inner.KeyGuide, srcInner and srcInner.KeyGuide
-    if kg and kg:IsValid() then
-        if srcKg and srcKg:IsValid() then
-            kg:SetInputAction(FName(srcKg.bindActionName.Key:ToString()))
-        end
-        local inputType = PalInput.currentType()
-        local brush = PalInput.forKey(p.key, inputType)
-        if brush and kg.OverrideImageMap then
-            kg.OverrideImageMap:Add(inputType, brush)
-            kg.EnableOverrideImage = true
-            kg:OverrideImage()
-        end
-        if kg.PalUIActionWidgetBase_24 and kg.PalUIActionWidgetBase_24:IsValid() then
-            kg.PalUIActionWidgetBase_24:SetVisibility(SELF_HIT_TEST_INVISIBLE)
-        end
-    end
+    local srcKg = srcInner and srcInner.KeyGuide
+    applyGlyph(p, srcKg)
 
     for _, fix in ipairs(ROW_FIXUPS) do
         local w = inner[fix[1]]
@@ -541,6 +552,7 @@ local function showInRange(canvas)
         if p.row and p.row:IsValid() then
             if p.inRange then
                 syncRow(p, true)  -- focus may have moved to a different object of the same class
+                applyGlyph(p) -- the native icon logic can stomp ours; resync on show
                 p.row:SetVisibility(VISIBLE)
                 local anim = p.row.Default_In
                 if anim and anim:IsValid() then p.row:PlayAnimationForward(anim, 1.0, false) end
@@ -594,7 +606,8 @@ local function prewarm()
     getPlayer()
     getPC()
     for _, p in ipairs(prompts) do
-        if p.key then PalInput.fkey(p.key) end
+        if p.key then PalInput.fkey(p.key, PalInput.MOUSE_KEYBOARD) end
+        if p.gamepad_key then PalInput.fkey(p.gamepad_key, PalInput.GAMEPAD) end
     end
     buildRowsSoon()
 end
@@ -603,8 +616,8 @@ end
 local hooked = false
 local function ensureHooks()
     if hooked then return end
-    local okHide = pcall(RegisterHook, CANVAS_CLASS .. ":HideIndicators", pin(profiled("HideIndicators hook", onHideIndicators)))
-    local okShow = pcall(RegisterHook, CANVAS_CLASS .. ":ShowIndicators", pin(profiled("ShowIndicators hook", onShowIndicators)))
+    local okHide = pcall(RegisterHook, CANVAS_CLASS .. ":HideIndicators", pin(onHideIndicators))
+    local okShow = pcall(RegisterHook, CANVAS_CLASS .. ":ShowIndicators", pin(onShowIndicators))
     hooked = okHide and okShow
 end
 
@@ -626,7 +639,7 @@ end
 local function onWorldUnloading()
     for _, p in ipairs(prompts) do
         if p.active then disengage(p, "on_cancel") end
-        p.row, p.pushImage, p.keyStruct = nil, nil, nil
+        p.row, p.pushImage, p.keyStruct, p.gamepadKeyStruct = nil, nil, nil, nil
         p.inRange, p.wasDown = false, false
         -- overrides survive reload (ModelInstanceId); what's applied to a dead row doesn't
         p.appliedOid, p.appliedMode, p.activeOid = nil, p.mode, nil
@@ -643,6 +656,7 @@ local function bootstrap()
     PalEvents.onNewObject(CANVAS_CLASS, onCanvasCreated)
     PalEvents.onPlayerSpawned(onPlayerSpawned)
     PalEvents.onWorldUnloading(onWorldUnloading)
+    PalInput.onChanged(onDeviceChanged)
     -- hot reload: the world may already exist, no construction event coming
     ExecuteInGameThread(pin(function()
         if findCanvas() then
@@ -660,16 +674,23 @@ local function tickPrompt(p, controller)
     -- panning chest to chest doesn't always fire show/hide; re-point here too
     if p.inRange and not p.active then syncRow(p) end
 
-    if p.keyStruct == nil and p.key then p.keyStruct = PalInput.fkey(p.key) end
-    if not p.keyStruct then return end
+    -- both bindings poll independently; either device can fire the prompt
+    if p.keyStruct == nil and p.key then p.keyStruct = PalInput.fkey(p.key, PalInput.MOUSE_KEYBOARD) end
+    if p.gamepadKeyStruct == nil and p.gamepad_key then
+        p.gamepadKeyStruct = PalInput.fkey(p.gamepad_key, PalInput.GAMEPAD)
+    end
+    if not (p.keyStruct or p.gamepadKeyStruct) then return end
 
     -- the FKey points into the input-data CDO; a GC pass can invalidate it
-    local ok, isDown = pcall(function() return controller:IsInputKeyDown(p.keyStruct) end)
-    if not ok then
-        p.keyStruct = nil
-        return
+    local down = false
+    if p.keyStruct then
+        local ok, isDown = pcall(function() return controller:IsInputKeyDown(p.keyStruct) end)
+        if ok then down = down or (isDown and true or false) else p.keyStruct = nil end
     end
-    local down = isDown and true or false
+    if p.gamepadKeyStruct then
+        local ok, isDown = pcall(function() return controller:IsInputKeyDown(p.gamepadKeyStruct) end)
+        if ok then down = down or (isDown and true or false) else p.gamepadKeyStruct = nil end
+    end
 
     if down and not p.wasDown then
         -- second press only matters for a latched toggle-hold; else just engage
@@ -702,7 +723,7 @@ local function tickPrompt(p, controller)
     end
 end
 
-local tickBody = profiled("input tick", function()
+local function tickBody()
     resetTickCache()
 
     local anyWork = false
@@ -716,7 +737,7 @@ local tickBody = profiled("input tick", function()
         if (os.clock() - lastShownAt) > 3.0 then
             awake = false
             for _, p in ipairs(prompts) do
-                p.keyStruct, p.wasDown = nil, false
+                p.keyStruct, p.gamepadKeyStruct, p.wasDown = nil, nil, false
             end
         end
         return
@@ -727,7 +748,7 @@ local tickBody = profiled("input tick", function()
     for _, p in ipairs(prompts) do
         tickPrompt(p, controller)
     end
-end)
+end
 
 -- LoopAsync runs on a background thread; UE objects are game-thread only
 local function loopTick()
@@ -828,7 +849,7 @@ function Prompt:destroy()
         end
         if self.active then disengage(self, "on_cancel") end
         if self.row and self.row:IsValid() then self.row:SetVisibility(COLLAPSED) end
-        self.row, self.pushImage, self.keyStruct = nil, nil, nil
+        self.row, self.pushImage, self.keyStruct, self.gamepadKeyStruct = nil, nil, nil, nil
         self.inRange, self.wasDown = false, false
         self.appliedOid, self.appliedMode = nil, nil
     end))
@@ -837,10 +858,11 @@ end
 
 -- Register a prompt (see the header for the full option/callback reference).
 ---@alias PromptMode "tap"|"hold"|"timed"
+---@alias PromptKey string|{ keyboard: string, gamepad: string|nil }
 ---@class PromptOpts
 ---@field target string
 ---@field label string
----@field key string
+---@field key PromptKey
 ---@field mode PromptMode|nil
 ---@field hold_time number|nil
 ---@field on_hold function|nil
@@ -854,10 +876,17 @@ function M.new(opts)
     assert(opts.mode == nil or opts.mode == "tap" or opts.mode == "hold" or opts.mode == "timed",
         'PalPrompt.new: mode must be "tap", "hold", or "timed"')
 
+    local key, gamepadKey = opts.key, nil
+    if type(key) == "table" then
+        key, gamepadKey = key.keyboard, key.gamepad
+        assert(key or gamepadKey, "PalPrompt.new: key table needs keyboard or gamepad")
+    end
+
     local p = {
         target = opts.target,
         label = opts.label or "",
-        key = opts.key,
+        key = key,
+        gamepad_key = gamepadKey, -- nil = the keyboard key's glyph shows on a pad too
         mode = opts.mode or "tap",
         hold_time = opts.hold_time or 1.0,
         on_hold = opts.on_hold,
@@ -868,6 +897,7 @@ function M.new(opts)
         row = nil,
         pushImage = nil,
         keyStruct = nil,
+        gamepadKeyStruct = nil,
         appliedMode = opts.mode or "tap",
         appliedOid = nil,
         activeOid = nil,
